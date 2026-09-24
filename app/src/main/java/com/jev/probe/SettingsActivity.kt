@@ -321,6 +321,14 @@ class SettingsActivity : AppCompatActivity() {
         val autoRow = toggleRow("对方发消息时自动分析", prefs.autoAnalyze)
         card2.addView(autoRow)
 
+        // --- 双语模式 ---
+        val bilingualRow = toggleRow("双语模式（翻译 + 外语回复，不用 Jev）", prefs.bilingualMode)
+        card2.addView(bilingualRow)
+        card2.addView(text("开启后只用「回复接口」一把密钥：对方消息翻成中文，3 条回复用下面的语言写并附中文对照，填入只填外语。", 11f, sub))
+        card2.addView(label("回复语言"))
+        val langEdit = edit(prefs.bilingualLang, Prefs.DEFAULT_BILINGUAL_LANG)
+        card2.addView(langEdit)
+
         // --- OCR 兜底（B 阶段）---
         val ocrFallbackRow = toggleRow("树读不到正文时用 OCR 兜底", prefs.ocrFallback)
         card2.addView(ocrFallbackRow)
@@ -435,6 +443,8 @@ class SettingsActivity : AppCompatActivity() {
             prefs.whitelist = wlEdit.text.toString().split("\n")
                 .map { it.trim() }.filter { it.isNotEmpty() }.toSet()
             prefs.autoAnalyze = (autoRow.tag as? Boolean) ?: true
+            prefs.bilingualMode = (bilingualRow.tag as? Boolean) ?: false
+            prefs.bilingualLang = langEdit.text.toString()
             prefs.ocrFallback = (ocrFallbackRow.tag as? Boolean) ?: true
             prefs.ocrAutoAnalyze = (ocrAutoRow.tag as? Boolean) ?: false
             prefs.contextEnabled = (ctxRow.tag as? Boolean) ?: false

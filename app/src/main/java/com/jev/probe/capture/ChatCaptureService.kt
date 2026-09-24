@@ -19,6 +19,7 @@ import com.jev.probe.core.Prefs
 import com.jev.probe.core.kb.ContextBuilder
 import com.jev.probe.core.kb.KbStore
 import com.jev.probe.jev.JevClient
+import com.jev.probe.jev.ReplyClient
 import com.jev.probe.overlay.OverlayController
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -48,7 +49,7 @@ open class ChatCaptureService : AccessibilityService() {
      *  disabled and handled by a short-circuit notice instead of an adapter (see
      *  [maybeCapture] / [onAccessibilityEvent]). [WeChatAdapter] is kept in the
      *  codebase for a possible future restore, just not used here. */
-    private val adapters = listOf(QQAdapter(), XAdapter(), FeishuAdapter()).associateBy { it.pkg }
+    private val adapters = listOf(QQAdapter(), XAdapter(), FeishuAdapter(), WhatsAppAdapter(), WhatsAppAdapter(WhatsAppAdapter.PKG_BUSINESS)).associateBy { it.pkg }
 
     /** Submit to the worker, ignoring rejection after the service is torn down
      *  (a stale overlay callback must never crash the process). */
@@ -292,6 +293,7 @@ open class ChatCaptureService : AccessibilityService() {
     private fun runAnalysis() {
         val snapshot = pendingSnapshot ?: return
         if (analyzing) return
+        if (prefs.bilingualMode) { runBilingual(snapshot); return }
         if (!prefs.hasKey()) { main.post { overlay?.showError("未设置判断接口密钥，去设置里填") }; return }
         analyzing = true
         main.post { overlay?.showLoading(); overlay?.setNote(snapshot.note) }
@@ -328,6 +330,38 @@ open class ChatCaptureService : AccessibilityService() {
                     analyzing = false
                     overlay?.showReplies(ranked, replyError) { text -> fillInput(text) }
                 }
+            }
+        }
+    }
+
+    /**
+     * Bilingual mode: no Jev call at all. One reply-route round trip returns
+     * the Chinese translation of the other side plus 3 target-language replies
+     * with Chinese glosses; "填入" fills only the target-language text.
+     */
+    private fun runBilingual(snapshot: ChatSnapshot) {
+        if (!prefs.hasReplyKey()) { main.post { overlay?.showError("未设置回复接口密钥，去设置里填") }; return }
+        analyzing = true
+        main.post { overlay?.showLoading(); overlay?.setNote(snapshot.note) }
+        val rel = prefs.relationship
+        val lang = prefs.bilingualLang
+        val pkg = activePkg ?: ""
+        submit {
+            val ctx = try {
+                ContextBuilder.build(this, snapshot, pkg, prefs)
+            } catch (e: Exception) {
+                Log.w(TAG, "context build failed: ${e.javaClass.simpleName}"); null
+            }
+            main.post { overlay?.setContextInfo(ctx?.notes?.size ?: 0, ctx?.history?.size ?: 0) }
+            val result = try {
+                ReplyClient(prefs).draftBilingual(snapshot, rel, lang, ctx)
+            } catch (e: Exception) {
+                main.post { analyzing = false; overlay?.showError(e.message ?: e.javaClass.simpleName) }
+                return@submit
+            }
+            main.post {
+                analyzing = false
+                overlay?.showBilingual(result, lang) { text -> fillInput(text) }
             }
         }
     }

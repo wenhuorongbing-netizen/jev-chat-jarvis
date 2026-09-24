@@ -213,6 +213,20 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         get() = sp.getBoolean(K_AUTO, true)
         set(v) = sp.edit().putBoolean(K_AUTO, v).apply()
 
+    /**
+     * Bilingual mode: skip Jev entirely; the reply route alone translates the
+     * other side into Chinese and drafts 3 replies in [bilingualLang] with
+     * Chinese glosses. Only the reply key is needed.
+     */
+    var bilingualMode: Boolean
+        get() = sp.getBoolean(K_BILINGUAL, false)
+        set(v) = sp.edit().putBoolean(K_BILINGUAL, v).apply()
+
+    /** Language the replies are written in (and filled), e.g. "德语". */
+    var bilingualLang: String
+        get() = sp.getString(K_BILINGUAL_LANG, DEFAULT_BILINGUAL_LANG) ?: DEFAULT_BILINGUAL_LANG
+        set(v) = sp.edit().putString(K_BILINGUAL_LANG, v.trim().ifBlank { DEFAULT_BILINGUAL_LANG }).apply()
+
     // ------------------------------------------------------------- helpers
 
     /** Reply route key, falling back to the judge key. */
@@ -253,6 +267,9 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
     /** Readiness gate: the judge route is the one that must be configured. */
     fun hasKey(): Boolean = judgeKey.isNotBlank()
 
+    /** Bilingual mode only needs the reply route. */
+    fun hasReplyKey(): Boolean = effectiveReplyKey().isNotBlank()
+
     companion object {
         private const val TAG = "JEVASSIST"
 
@@ -286,6 +303,9 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         private const val K_BUBBLE_Y = "bubble_y"
         private const val K_BUBBLE_X = "bubble_x"
         private const val K_AUTO = "auto_analyze"
+        private const val K_BILINGUAL = "bilingual_mode"
+        private const val K_BILINGUAL_LANG = "bilingual_lang"
+        const val DEFAULT_BILINGUAL_LANG = "德语"
 
         const val PROVIDER_BOCHA = "bocha"
         const val PROVIDER_OPENROUTER = "openrouter"

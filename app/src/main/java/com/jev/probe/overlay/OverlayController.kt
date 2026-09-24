@@ -20,6 +20,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.jev.probe.core.Analysis
+import com.jev.probe.core.BilingualResult
 import com.jev.probe.core.ChatSnapshot
 import com.jev.probe.core.Prefs
 import com.jev.probe.core.RankedReply
@@ -385,6 +386,30 @@ class OverlayController(private val ctx: Context) {
         render(a, generating = false)
     }
 
+    /** Bilingual mode: translation of the other side, then 3 target-language
+     *  replies with Chinese glosses. "填入" fills only the target-language text. */
+    fun showBilingual(r: BilingualResult, lang: String, onFill: (String) -> Unit) {
+        ensureRoot(); bubble?.alpha = 1f
+        panel?.background = card(18, panelBg(), stroke = true)
+        lastFill = onFill
+        lastJudgment = null
+        val views = ArrayList<View>()
+        views.add(hint(
+            if (ctxNotes == 0 && ctxHistory == 0) "双语模式 · 未用知识库"
+            else "双语模式 · 知识库 $ctxNotes 条 · 历史 $ctxHistory 条"))
+        noteText?.let { if (it.isNotBlank()) views.add(hint(it)) }
+        if (r.translation.isNotBlank()) {
+            views.add(line("对方说（译）", "#9CA3AF", 12f))
+            views.add(line(r.translation, "#111827", 15f, true))
+        }
+        views.add(divider())
+        views.add(line("候选回复（填入只填${lang}）", "#9CA3AF", 12f))
+        r.replies.forEachIndexed { i, reply -> views.add(replyCard(i + 1, reply.text, -1, onFill, reply.zh)) }
+        views.add(reAnalyzeBtn())
+        setContent(views)
+        if (!expanded) toggle()
+    }
+
     fun toast(msg: String) = Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
 
     fun hide() {
@@ -471,7 +496,7 @@ class OverlayController(private val ctx: Context) {
         return row
     }
 
-    private fun replyCard(rank: Int, text: String, pct: Int, onFill: (String) -> Unit): View {
+    private fun replyCard(rank: Int, text: String, pct: Int, onFill: (String) -> Unit, zh: String = ""): View {
         val top = rank == 1
         val cardBg = if (top) Color.parseColor("#EAF1FF") else Color.parseColor("#F3F4F6")
         val c = LinearLayout(ctx).apply {
@@ -483,12 +508,17 @@ class OverlayController(private val ctx: Context) {
             ).apply { topMargin = dp(6) }
         }
         c.addView(TextView(ctx).apply {
-            this.text = "#$rank · ${pct}%"; setTextColor(Color.parseColor("#3A7AFE")); textSize = 11f
+            this.text = if (pct < 0) (if (top) "#$rank · 推荐" else "#$rank") else "#$rank · ${pct}%"
+            setTextColor(Color.parseColor("#3A7AFE")); textSize = 11f
             setTypeface(typeface, Typeface.BOLD)
         })
         c.addView(TextView(ctx).apply {
             this.text = text; setTextColor(Color.parseColor("#111827")); textSize = 14f
-            setPadding(0, dp(3), 0, dp(7)); setLineSpacing(dp(2).toFloat(), 1f)
+            setPadding(0, dp(3), 0, if (zh.isBlank()) dp(7) else dp(2)); setLineSpacing(dp(2).toFloat(), 1f)
+        })
+        if (zh.isNotBlank()) c.addView(TextView(ctx).apply {
+            this.text = zh; setTextColor(Color.parseColor("#6B7280")); textSize = 12.5f
+            setPadding(0, 0, 0, dp(7))
         })
         val btns = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
         btns.addView(pill("复制", false) { copy(text) })

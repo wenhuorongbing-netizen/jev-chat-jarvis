@@ -1,6 +1,8 @@
 package com.jev.probe.jev
 
+import com.jev.probe.core.BilingualResult
 import com.jev.probe.core.ChatSnapshot
+import com.jev.probe.core.RankedReply
 import com.jev.probe.core.Prefs
 import com.jev.probe.core.kb.ChatContext
 import org.json.JSONArray
@@ -30,6 +32,50 @@ class ReplyClient(private val prefs: Prefs) {
         val user = knowledgeBlock(relationship, ctx) +
             "关系：$relationship\n\n最近对话：\n$convo\n\n请给出 3 条候选回复。"
         return parseThree(chat(sys, user, temperature = 0.8))
+    }
+
+    /**
+     * Bilingual mode, one round trip: the other side's latest messages rendered
+     * in Chinese, plus 3 context-aware replies written in [lang] (the language
+     * that gets filled) each with a Chinese gloss. Order = model's preference,
+     * so the first card is the recommended one.
+     */
+    fun draftBilingual(
+        snapshot: ChatSnapshot,
+        relationship: String,
+        lang: String,
+        ctx: ChatContext? = null
+    ): BilingualResult {
+        val convo = snapshot.messages.takeLast(12).joinToString("\n") {
+            (if (it.side == "me") "我" else "对方") + "：" + it.text
+        }
+        val sys = "你是跨语言即时通讯回复助手，用户是中国人，正在和对方用${lang}聊天。" +
+            "只输出一个 JSON 对象，格式：" +
+            "{\"translation\":\"对方最近连续几条消息的中文翻译（原文已是中文则照抄）\"," +
+            "\"replies\":[{\"text\":\"${lang}回复\",\"zh\":\"这条回复的中文意思\"}, …共3条]}。" +
+            "先读懂上下文和对方真实意图，再写回复。3 条回复策略要有区别（例如：一条稳妥承接、" +
+            "一条给具体行动或承诺、一条简短轻松），按最推荐到最不推荐排序。" +
+            "text 必须是地道、口语化、像母语者在聊天软件里发的${lang}，不超过 60 词；" +
+            "zh 是忠实的中文对照。不要解释，不要输出 JSON 以外的任何内容。"
+        val user = knowledgeBlock(relationship, ctx) +
+            "关系：$relationship\n\n最近对话：\n$convo\n\n请翻译对方的最新消息，并给出 3 条${lang}回复。"
+        return parseBilingual(chat(sys, user, temperature = 0.7))
+    }
+
+    private fun parseBilingual(content: String): BilingualResult {
+        val start = content.indexOf('{')
+        val end = content.lastIndexOf('}')
+        if (start < 0 || end <= start) throw IllegalStateException("模型没有返回 JSON：${content.take(80)}")
+        val obj = JSONObject(content.substring(start, end + 1))
+        val arr = obj.optJSONArray("replies") ?: JSONArray()
+        val replies = ArrayList<RankedReply>()
+        for (i in 0 until arr.length()) {
+            val r = arr.optJSONObject(i) ?: continue
+            val text = r.optString("text").trim()
+            if (text.isNotEmpty()) replies.add(RankedReply(text, 0.0, r.optString("zh").trim()))
+        }
+        if (replies.isEmpty()) throw IllegalStateException("模型没有给出候选回复")
+        return BilingualResult(obj.optString("translation").trim(), replies.take(3))
     }
 
     /** The background + history preamble; empty string when there is no context. */

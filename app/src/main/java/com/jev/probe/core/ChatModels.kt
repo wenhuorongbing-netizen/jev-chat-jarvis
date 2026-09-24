@@ -53,4 +53,10 @@ data class Analysis(
 
 data class Choice(val choice: String, val confidence: Double, val probabilities: Map<String, Double>)
 data class Score(val score: Double, val confidence: Double, val maxLevel: Int)
-data class RankedReply(val text: String, val prob: Double)
+/** [zh] is the Chinese gloss shown under a foreign-language reply in bilingual
+ *  mode; only [text] is ever filled into the input box. */
+data class RankedReply(val text: String, val prob: Double, val zh: String = "")
+
+/** Bilingual-mode result: the other side's recent messages in Chinese, plus 3
+ *  replies in the target language with Chinese glosses. */
+data class BilingualResult(val translation: String, val replies: List<RankedReply>)

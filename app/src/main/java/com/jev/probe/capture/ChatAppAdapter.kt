@@ -508,3 +508,59 @@ class XAdapter : ChatAppAdapter {
 
     private data class Row(val top: Int, val sender: String, val text: String)
 }
+
+/**
+ * WhatsApp (com.whatsapp) and WhatsApp Business (com.whatsapp.w4b). Classic
+ * View UI, nodes not obfuscated: message bodies are TextViews carrying
+ * `id/message_text`, the thread title is `id/conversation_contact_name`, the
+ * input box is `id/entry`, and the send button (`id/send`) is never touched.
+ * IDs are shared by both apps, only the package prefix differs.
+ *
+ * "In a chat window" = the input box exists (the chat list has no `id/entry`).
+ *
+ * Side: WhatsApp leaves a wide gutter on the far side of every bubble (incoming
+ * hugs the left edge, outgoing hugs the right), so whichever edge sits closer
+ * to the screen border is the sender's side. Unverified on a real device.
+ */
+class WhatsAppAdapter(override val pkg: String = PKG) : ChatAppAdapter {
+
+    override fun extract(root: AccessibilityNodeInfo, res: Resources): ChatSnapshot? {
+        val width = res.displayMetrics.widthPixels
+        val bubbleId = "$pkg:id/message_text"
+        val titleId = "$pkg:id/conversation_contact_name"
+        val inputId = "$pkg:id/entry"
+        val bubbles = ArrayList<Triple<Int, String, String>>() // top, side, text
+        var firstBubbleTop = Int.MAX_VALUE
+        var title: String? = null
+        var hasInput = false
+
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        stack.addLast(root)
+        var guard = 0
+        while (stack.isNotEmpty() && guard < 6000) {
+            guard++
+            val node = stack.removeLast()
+            val id = node.viewIdResourceName
+            val text = node.text?.toString()
+            if (id == bubbleId && !text.isNullOrBlank()) {
+                val b = Rect(); node.getBoundsInScreen(b)
+                val side = if (width - b.right < b.left) "me" else "other"
+                bubbles.add(Triple(b.top, side, text.trim()))
+                if (b.top < firstBubbleTop) firstBubbleTop = b.top
+            }
+            if (!hasInput && id == inputId) hasInput = true
+            if (title == null && id == titleId) text?.let { if (it.isNotBlank()) title = it }
+            for (i in node.childCount - 1 downTo 0) node.getChild(i)?.let { stack.addLast(it) }
+        }
+        if (!hasInput) return null
+        if (title == null) title = findTitleInActionBar(root, firstBubbleTop, width, res, 0.1, 0.7)
+        if (bubbles.isEmpty()) return ChatSnapshot(title, emptyList())
+        bubbles.sortBy { it.first }
+        return ChatSnapshot(title, bubbles.map { Msg(it.second, it.third) })
+    }
+
+    companion object {
+        const val PKG = "com.whatsapp"
+        const val PKG_BUSINESS = "com.whatsapp.w4b"
+    }
+}
