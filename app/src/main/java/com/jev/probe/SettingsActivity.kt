@@ -152,6 +152,7 @@ class SettingsActivity : AppCompatActivity() {
         judgeCard.addView(bochaBox)
         judgeCard.addView(label("密钥"))
         judgeCard.addView(edit(prefs.judgeKey, "sk-...", password = true).also { judgeKeyEdit = it })
+        judgeCard.addView(pasteBtn(judgeKeyEdit))
         judgeCard.addView(label("模型"))
         judgeCard.addView(judgeModelEdit)
         val judgeResult = resultText()
@@ -219,6 +220,7 @@ class SettingsActivity : AppCompatActivity() {
         replyCard.addView(replyBaseEdit)
         replyCard.addView(label("密钥"))
         replyCard.addView(edit(prefs.replyKey, "留空则用判断接口密钥", password = true).also { replyKeyEdit = it })
+        replyCard.addView(pasteBtn(replyKeyEdit))
         replyCard.addView(label("模型"))
         replyCard.addView(replyModelEdit)
         val replyResult = resultText()
@@ -272,6 +274,7 @@ class SettingsActivity : AppCompatActivity() {
         visionCard.addView(visionBaseEdit)
         visionCard.addView(label("密钥"))
         visionCard.addView(edit(prefs.visionKey, "留空则用回复接口密钥", password = true).also { visionKeyEdit = it })
+        visionCard.addView(pasteBtn(visionKeyEdit))
         visionCard.addView(label("模型"))
         visionCard.addView(visionModelEdit)
         val visionResult = resultText()
@@ -627,6 +630,27 @@ class SettingsActivity : AppCompatActivity() {
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             .apply { topMargin = dp(10) }
+    }
+
+    /** 有些 ROM 的安全键盘在密码框里不给粘贴，单独放一个按钮：只读剪贴板写进输入框，不显示内容。 */
+    private fun pasteBtn(target: EditText) = TextView(this).apply {
+        text = "粘贴"; textSize = 13f; gravity = Gravity.CENTER
+        setTypeface(typeface, Typeface.BOLD)
+        setTextColor(accent); background = round(dp(10), Color.WHITE, stroke = true)
+        setPadding(dp(16), dp(6), dp(16), dp(6))
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(4) }
+        setOnClickListener {
+            val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            val clip = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)
+                ?.coerceToText(this@SettingsActivity)?.toString()?.trim().orEmpty()
+            if (clip.isEmpty()) {
+                Toast.makeText(this@SettingsActivity, "剪贴板是空的", Toast.LENGTH_SHORT).show()
+            } else {
+                target.setText(clip)
+                Toast.makeText(this@SettingsActivity, "已粘贴（${clip.length} 位），记得保存", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     private fun edit(value: String, hint: String, password: Boolean = false) = EditText(this).apply {
