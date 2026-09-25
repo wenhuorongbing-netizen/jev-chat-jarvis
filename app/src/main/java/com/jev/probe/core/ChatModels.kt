@@ -59,4 +59,9 @@ data class RankedReply(val text: String, val prob: Double, val zh: String = "")
 
 /** Bilingual-mode result: the other side's recent messages in Chinese, plus 3
  *  replies in the target language with Chinese glosses. */
-data class BilingualResult(val translation: String, val replies: List<RankedReply>)
+data class BilingualResult(
+    val translation: String,
+    val replies: List<RankedReply>,
+    val lang: String = "",
+    val analysis: String = ""
+)

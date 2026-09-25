@@ -219,7 +219,7 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
      * Chinese glosses. Only the reply key is needed.
      */
     var bilingualMode: Boolean
-        get() = sp.getBoolean(K_BILINGUAL, false)
+        get() = sp.getBoolean(K_BILINGUAL, true)  // 默认开：只要回复接口一把 key，不用 Jev
         set(v) = sp.edit().putBoolean(K_BILINGUAL, v).apply()
 
     /** Language the replies are written in (and filled), e.g. "德语". */

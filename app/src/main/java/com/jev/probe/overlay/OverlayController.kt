@@ -388,22 +388,23 @@ class OverlayController(private val ctx: Context) {
 
     /** Bilingual mode: translation of the other side, then 3 target-language
      *  replies with Chinese glosses. "填入" fills only the target-language text. */
-    fun showBilingual(r: BilingualResult, lang: String, onFill: (String) -> Unit) {
+    fun showBilingual(r: BilingualResult, onFill: (String) -> Unit) {
         ensureRoot(); bubble?.alpha = 1f
         panel?.background = card(18, panelBg(), stroke = true)
         lastFill = onFill
         lastJudgment = null
+        val lang = r.lang.ifBlank { "对方的语言" }
         val views = ArrayList<View>()
         views.add(hint(
-            if (ctxNotes == 0 && ctxHistory == 0) "双语模式 · 未用知识库"
-            else "双语模式 · 知识库 $ctxNotes 条 · 历史 $ctxHistory 条"))
+            if (ctxNotes == 0 && ctxHistory == 0) "智能回复 · 未用知识库"
+            else "智能回复 · 知识库 $ctxNotes 条 · 历史 $ctxHistory 条"))
         noteText?.let { if (it.isNotBlank()) views.add(hint(it)) }
-        if (r.translation.isNotBlank()) {
-            views.add(line("对方说（译）", "#9CA3AF", 12f))
-            views.add(line(r.translation, "#111827", 15f, true))
-        }
+        views.add(line("对方说 · $lang", "#9CA3AF", 12f))
+        if (r.translation.isNotBlank()) views.add(line(r.translation, "#111827", 15f, true))
+        // 模型怎么理解的：理解错了回复多半也跑偏，放出来一眼就看得到
+        if (r.analysis.isNotBlank()) views.add(line("💡 ${r.analysis}", "#6B7280", 12.5f))
         views.add(divider())
-        views.add(line("候选回复（填入只填${lang}）", "#9CA3AF", 12f))
+        views.add(line(if (lang == "中文") "候选回复" else "候选回复（填入只填$lang）", "#9CA3AF", 12f))
         r.replies.forEachIndexed { i, reply -> views.add(replyCard(i + 1, reply.text, -1, onFill, reply.zh)) }
         views.add(reAnalyzeBtn())
         setContent(views)

@@ -344,7 +344,6 @@ open class ChatCaptureService : AccessibilityService() {
         analyzing = true
         main.post { overlay?.showLoading(); overlay?.setNote(snapshot.note) }
         val rel = prefs.relationship
-        val lang = prefs.bilingualLang
         val pkg = activePkg ?: ""
         submit {
             val ctx = try {
@@ -354,14 +353,14 @@ open class ChatCaptureService : AccessibilityService() {
             }
             main.post { overlay?.setContextInfo(ctx?.notes?.size ?: 0, ctx?.history?.size ?: 0) }
             val result = try {
-                ReplyClient(prefs).draftBilingual(snapshot, rel, lang, ctx)
+                ReplyClient(prefs).draftBilingual(snapshot, rel, ctx)
             } catch (e: Exception) {
                 main.post { analyzing = false; overlay?.showError(e.message ?: e.javaClass.simpleName) }
                 return@submit
             }
             main.post {
                 analyzing = false
-                overlay?.showBilingual(result, lang) { text -> fillInput(text) }
+                overlay?.showBilingual(result) { text -> fillInput(text) }
             }
         }
     }
