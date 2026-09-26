@@ -97,6 +97,7 @@ class MainActivity : AppCompatActivity() {
 
         // Readiness card
         container.addView(statusCard(ready, a11y, overlay, key))
+        crashHint()?.let { container.addView(it) }
         container.addView(privacyHint())
 
         // Permission checklist
@@ -150,6 +151,32 @@ class MainActivity : AppCompatActivity() {
     private fun privacyHint(): View = text("读取的聊天内容只发往你自己配置的接口 · 隐私政策", 11f, sub).apply {
         setPadding(dp(4), dp(8), 0, 0)
         setOnClickListener { openUrl(PRIVACY_URL) }
+    }
+
+    /**
+     * Crash hint under the readiness card: shown when filesDir/crash_last.log
+     * exists (only existence is checked — the stack is never displayed in UI).
+     * The clear button deletes the file and rebuilds the screen.
+     */
+    private fun crashHint(): View? {
+        val log = java.io.File(filesDir, App.CRASH_LAST)
+        if (!log.exists()) return null
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), dp(8), 0, 0)
+        }
+        row.addView(text("上次运行崩溃过，日志已存在本机", 11f, red).apply {
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        row.addView(text("清除", 11f, red, bold = true).apply {
+            setPadding(dp(12), dp(2), dp(4), dp(2))
+            setOnClickListener {
+                log.delete()
+                java.io.File(filesDir, App.CRASH_PREV).delete()
+                build()
+            }
+        })
+        return row
     }
 
     /** Opens an external link; swallows the failure with a toast rather than crashing. */

@@ -46,8 +46,17 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            // Prefer the real release key; fall back to the debug key when the
+            // props file is unavailable (e.g. CI/dev machines without H:), so
+            // `pm install -r` still matches the debug-signed build on devices.
             signingConfig = signingConfigs.findByName("release")
+                ?: signingConfigs.findByName("debug")
         }
     }
 
