@@ -16,7 +16,10 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import android.content.res.Configuration
 import com.jev.probe.core.Prefs
+import com.jev.probe.core.ui.UiTokens
+import com.jev.probe.core.ui.color
 import kotlin.math.roundToInt
 
 /**
@@ -31,11 +34,18 @@ class MainActivity : AppCompatActivity() {
     private val a11yComponent =
         "com.jev.probe/com.google.android.accessibility.selecttospeak.SelectToSpeakService"
 
-    private val accent = Color.parseColor("#3A7AFE")
-    private val green = Color.parseColor("#16A34A")
-    private val red = Color.parseColor("#DC2626")
-    private val ink = Color.parseColor("#111827")
-    private val sub = Color.parseColor("#6B7280")
+    private val pal by lazy {
+        val dark = resources.configuration.uiMode and
+            Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+        UiTokens.palette(dark)
+    }
+    private val accent by lazy { color(pal.accent) }
+    private val green by lazy { color(pal.ok) }
+    private val red by lazy { color(pal.danger) }
+    private val ink by lazy { color(pal.ink) }
+    private val sub by lazy { color(pal.sub) }
+    private val surface by lazy { color(pal.surface) }
+    private val cardBg by lazy { color(pal.card) }
 
     private fun dp(v: Int) = TypedValue.applyDimension(
         TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).roundToInt()
@@ -43,7 +53,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = Prefs(this)
-        window.decorView.setBackgroundColor(Color.parseColor("#F2F3F5"))
+        window.decorView.setBackgroundColor(color(pal.canvas))
 
         val scroll = ScrollView(this)
         container = LinearLayout(this).apply {
@@ -191,7 +201,7 @@ class MainActivity : AppCompatActivity() {
             text = if (on) "助手已开启 · 点击关闭" else "助手已关闭 · 点击开启"
             textSize = 15f; gravity = Gravity.CENTER; setTypeface(typeface, Typeface.BOLD)
             setTextColor(if (on) Color.WHITE else accent)
-            background = roundBg(dp(14), if (on) accent else Color.WHITE, stroke = !on)
+            background = roundBg(dp(14), if (on) accent else surface, stroke = !on)
             setPadding(dp(16), dp(15), dp(16), dp(15))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
@@ -203,7 +213,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun cardBox(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        background = roundBg(dp(14), Color.WHITE)
+        background = roundBg(dp(14), surface)
         setPadding(dp(14), dp(13), dp(14), dp(13))
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
@@ -227,7 +237,7 @@ class MainActivity : AppCompatActivity() {
     private fun btn(label: String, enabled: Boolean, onClick: () -> Unit) = TextView(this).apply {
         text = label; textSize = 13f; gravity = Gravity.CENTER; setTypeface(typeface, Typeface.BOLD)
         setTextColor(if (enabled) Color.WHITE else sub)
-        background = roundBg(dp(10), if (enabled) accent else Color.parseColor("#E5E7EB"))
+        background = roundBg(dp(10), if (enabled) accent else cardBg)
         setPadding(dp(16), dp(8), dp(16), dp(8))
         if (enabled) setOnClickListener { onClick() }
     }

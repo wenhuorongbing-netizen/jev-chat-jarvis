@@ -1,5 +1,6 @@
 package com.jev.probe
 
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -19,6 +20,8 @@ import androidx.appcompat.app.AppCompatActivity
 import com.jev.probe.core.kb.Contact
 import com.jev.probe.core.kb.KbStore
 import com.jev.probe.core.kb.Note
+import com.jev.probe.core.ui.UiTokens
+import com.jev.probe.core.ui.color
 import kotlin.math.roundToInt
 
 /**
@@ -37,11 +40,17 @@ class KnowledgeActivity : AppCompatActivity() {
     /** 0 = notes, 1 = contacts. */
     private var tab = 0
 
-    private val accent = Color.parseColor("#3A7AFE")
-    private val ink = Color.parseColor("#111827")
-    private val sub = Color.parseColor("#6B7280")
-    private val pillOff = Color.parseColor("#EEF1F5")
-    private val red = Color.parseColor("#DC2626")
+    private val pal by lazy {
+        val dark = resources.configuration.uiMode and
+            Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+        UiTokens.palette(dark)
+    }
+    private val accent by lazy { color(pal.accent) }
+    private val ink by lazy { color(pal.ink) }
+    private val sub by lazy { color(pal.sub) }
+    private val pillOff by lazy { color(pal.card) }
+    private val red by lazy { color(pal.danger) }
+    private val surface by lazy { color(pal.surface) }
 
     private fun dp(v: Int) = TypedValue.applyDimension(
         TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).roundToInt()
@@ -49,7 +58,7 @@ class KnowledgeActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = KbStore.get(this)
-        window.decorView.setBackgroundColor(Color.parseColor("#F2F3F5"))
+        window.decorView.setBackgroundColor(color(pal.canvas))
 
         val scroll = ScrollView(this)
         container = LinearLayout(this).apply {
@@ -354,7 +363,7 @@ class KnowledgeActivity : AppCompatActivity() {
         text = labelText; textSize = 14f; gravity = Gravity.CENTER
         setTypeface(typeface, Typeface.BOLD)
         setTextColor(if (primary) Color.WHITE else accent)
-        background = round(dp(11), if (primary) accent else Color.WHITE, stroke = !primary)
+        background = round(dp(11), if (primary) accent else surface, stroke = !primary)
         setPadding(dp(12), dp(11), dp(12), dp(11))
         layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             .apply { rightMargin = dp(8) }
@@ -365,7 +374,7 @@ class KnowledgeActivity : AppCompatActivity() {
         text = if (on) "开" else "关"; textSize = 13f; gravity = Gravity.CENTER
         setTypeface(typeface, Typeface.BOLD)
         setTextColor(if (on) Color.WHITE else sub)
-        background = round(dp(10), if (on) accent else Color.parseColor("#E5E7EB"))
+        background = round(dp(10), if (on) accent else pillOff)
         setPadding(dp(16), dp(6), dp(16), dp(6))
         setOnClickListener { onClick() }
     }
@@ -382,14 +391,14 @@ class KnowledgeActivity : AppCompatActivity() {
             text = if (initial) "开" else "关"; textSize = 13f; gravity = Gravity.CENTER
             setTypeface(typeface, Typeface.BOLD)
             setTextColor(if (initial) Color.WHITE else sub)
-            background = round(dp(10), if (initial) accent else Color.parseColor("#E5E7EB"))
+            background = round(dp(10), if (initial) accent else pillOff)
             setPadding(dp(18), dp(6), dp(18), dp(6))
         }
         sw.setOnClickListener {
             val now = !((row.tag as? Boolean) ?: true); row.tag = now
             sw.text = if (now) "开" else "关"
             sw.setTextColor(if (now) Color.WHITE else sub)
-            sw.background = round(dp(10), if (now) accent else Color.parseColor("#E5E7EB"))
+            sw.background = round(dp(10), if (now) accent else pillOff)
         }
         row.addView(lab); row.addView(sw)
         return row
@@ -399,7 +408,7 @@ class KnowledgeActivity : AppCompatActivity() {
 
     private fun card() = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        background = round(dp(14), Color.WHITE)
+        background = round(dp(14), surface)
         setPadding(dp(14), dp(12), dp(14), dp(12))
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -410,8 +419,8 @@ class KnowledgeActivity : AppCompatActivity() {
 
     private fun edit(value: String, hintText: String) = EditText(this).apply {
         setText(value); hint = hintText; textSize = 14f; setTextColor(ink)
-        setHintTextColor(Color.parseColor("#9CA3AF"))
-        background = round(dp(8), Color.parseColor("#F3F4F6"))
+        setHintTextColor(color(pal.faint))
+        background = round(dp(8), pillOff)
         setPadding(dp(10), dp(10), dp(10), dp(10))
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)

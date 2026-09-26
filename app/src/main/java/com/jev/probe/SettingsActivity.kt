@@ -1,5 +1,6 @@
 package com.jev.probe
 
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Typeface
@@ -26,6 +27,9 @@ import com.jev.probe.core.Msg
 import com.jev.probe.core.Prefs
 import com.jev.probe.core.kb.KbSelfCheck
 import com.jev.probe.core.kb.KbStore
+import com.jev.probe.core.ui.OverlayRules
+import com.jev.probe.core.ui.UiTokens
+import com.jev.probe.core.ui.color
 import com.jev.probe.jev.JudgeClient
 import com.jev.probe.jev.ReplyClient
 import com.jev.probe.jev.VisionClient
@@ -38,10 +42,16 @@ class SettingsActivity : AppCompatActivity() {
     private val worker = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
 
-    private val accent = Color.parseColor("#3A7AFE")
-    private val ink = Color.parseColor("#111827")
-    private val sub = Color.parseColor("#6B7280")
-    private val pillOff = Color.parseColor("#EEF1F5")
+    // §4-1 token 化 + 深色：以打开瞬间的 uiMode 为准（Activity 不重建，规格允许）。
+    private val pal: UiTokens.Palette by lazy {
+        UiTokens.palette(
+            resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+                Configuration.UI_MODE_NIGHT_YES)
+    }
+    private val accent by lazy { color(pal.accent) }
+    private val ink by lazy { color(pal.ink) }
+    private val sub by lazy { color(pal.sub) }
+    private val pillOff by lazy { color(pal.card) }
 
     /** Selected provider index per card, held so Save can read it back. */
     private var judgeProviderIdx = 0
@@ -54,7 +64,8 @@ class SettingsActivity : AppCompatActivity() {
         prefs = Prefs(this)
         Log.i(TAG, "settings opened judgeKey.len=${prefs.judgeKey.length}" +
             " replyKey.len=${prefs.replyKey.length} visionKey.len=${prefs.visionKey.length}")
-        window.decorView.setBackgroundColor(Color.parseColor("#F2F3F5"))
+        val pal = this.pal
+        window.decorView.setBackgroundColor(color(pal.canvas))
 
         val scroll = ScrollView(this)
         val root = LinearLayout(this).apply {
@@ -68,6 +79,10 @@ class SettingsActivity : AppCompatActivity() {
 
         // =================== 接口 ===================
         root.addView(section("接口"))
+
+        // §4-2/4-3：回复接口卡排第一；判断卡与视觉卡装进「高级」折叠容器。
+        // 容器先建好，判断/视觉卡的构建代码原样保留，只是 addView 目标换成它。
+        val advancedBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
         // --- 判断接口（Jev） ---
         val judgeCard = card()
@@ -101,7 +116,7 @@ class SettingsActivity : AppCompatActivity() {
         bochaRow.addView(TextView(this).apply {
             text = "复制"; textSize = 13f; gravity = Gravity.CENTER
             setTypeface(typeface, Typeface.BOLD)
-            setTextColor(accent); background = round(dp(10), Color.WHITE, stroke = true)
+            setTextColor(accent); background = round(dp(10), color(pal.surface), stroke = true)
             setPadding(dp(16), dp(6), dp(16), dp(6))
             setOnClickListener {
                 val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
@@ -193,7 +208,7 @@ class SettingsActivity : AppCompatActivity() {
             }
         })
         judgeCard.addView(judgeResult)
-        root.addView(judgeCard)
+        advancedBox.addView(judgeCard)
 
         // --- 回复接口 ---
         val replyCard = card()
@@ -308,11 +323,39 @@ class SettingsActivity : AppCompatActivity() {
             }
         })
         visionCard.addView(visionResult)
-        root.addView(visionCard)
+        advancedBox.addView(visionCard)
+
+        // --- 「高级」折叠条：点击只切 visibility，容器与卡内状态不重建、不丢失 ---
+        var advancedFolded = OverlayRules.foldAdvancedByDefault(prefs.bilingualMode)
+        val foldArrow = text("", 13f, accent, bold = true)
+        fun setAdvancedFolded(folded: Boolean) {
+            advancedFolded = folded
+            advancedBox.visibility = if (folded) View.GONE else View.VISIBLE
+            foldArrow.text = if (folded) "展开" else "收起"
+        }
+        val foldBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(2), dp(16), dp(2), dp(0))
+            setOnClickListener { setAdvancedFolded(!advancedFolded) }
+        }
+        foldBar.addView(text("高级：判断接口 · 识图接口", 13f, sub, bold = true).apply {
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        foldBar.addView(foldArrow)
+        root.addView(foldBar)
+        root.addView(advancedBox)
+        setAdvancedFolded(advancedFolded)
 
         // =================== 分析 ===================
         root.addView(section("分析"))
         val card2 = card()
+        card2.addView(label("关于我（回复会照这个人的口吻写）"))
+        val aboutEdit = edit(prefs.aboutMe, "例：在德国生活的中国人，做什么工作，说话随意简短，不爱用表情，德语什么水平").apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE; minLines = 2
+        }
+        card2.addView(aboutEdit)
+        card2.addView(text("另外会自动学你真实发出去的消息（长度、语气、标点），只存在手机本地。", 11f, sub))
         card2.addView(label("关系描述（给 Jev 判断用）"))
         val relEdit = edit(prefs.relationship, Prefs.DEFAULT_REL)
         card2.addView(relEdit)
@@ -321,11 +364,17 @@ class SettingsActivity : AppCompatActivity() {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE; minLines = 2
         }
         card2.addView(wlEdit)
-        val autoRow = toggleRow("对方发消息时自动分析", prefs.autoAnalyze)
+        val autoRow = toggleRow("新消息自动在后台生成（气泡变绿，点开即看）", prefs.autoAnalyze)
         card2.addView(autoRow)
+        val wechatRow = toggleRow("微信（实验）", prefs.wechatEnabled)
+        card2.addView(wechatRow)
+        card2.addView(text("新版微信对读屏服务隐藏了消息文字，部分设备还禁止截屏，可能读不到。", 11f, sub))
 
         // --- 双语模式 ---
-        val bilingualRow = toggleRow("智能回复（跟随对方语言，不用 Jev）", prefs.bilingualMode)
+        // §4-3：开关切换时同步高级容器折叠（开→折叠，关→展开），只改 visibility，不改 prefs。
+        val bilingualRow = toggleRow("智能回复（跟随对方语言，不用 Jev）", prefs.bilingualMode) { on ->
+            setAdvancedFolded(on)
+        }
         card2.addView(bilingualRow)
         card2.addView(text("只用「回复接口」一把密钥：对方说中文就中文回；说外语就翻成中文给你看，3 条回复用对方的语言写并附中文意思，填入只填外语。", 11f, sub))
 
@@ -443,6 +492,8 @@ class SettingsActivity : AppCompatActivity() {
             prefs.whitelist = wlEdit.text.toString().split("\n")
                 .map { it.trim() }.filter { it.isNotEmpty() }.toSet()
             prefs.autoAnalyze = (autoRow.tag as? Boolean) ?: true
+            prefs.wechatEnabled = (wechatRow.tag as? Boolean) ?: false
+            prefs.aboutMe = aboutEdit.text.toString()
             prefs.bilingualMode = (bilingualRow.tag as? Boolean) ?: false
             prefs.ocrFallback = (ocrFallbackRow.tag as? Boolean) ?: true
             prefs.ocrAutoAnalyze = (ocrAutoRow.tag as? Boolean) ?: false
@@ -591,7 +642,11 @@ class SettingsActivity : AppCompatActivity() {
         v.background = round(dp(9), if (on) accent else pillOff)
     }
 
-    private fun toggleRow(labelText: String, initial: Boolean): LinearLayout {
+    private fun toggleRow(
+        labelText: String,
+        initial: Boolean,
+        onToggle: ((Boolean) -> Unit)? = null,
+    ): LinearLayout {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(12), 0, dp(2)); tag = initial
@@ -603,14 +658,15 @@ class SettingsActivity : AppCompatActivity() {
             text = if (initial) "开" else "关"; textSize = 13f; gravity = Gravity.CENTER
             setTypeface(typeface, Typeface.BOLD)
             setTextColor(if (initial) Color.WHITE else sub)
-            background = round(dp(10), if (initial) accent else Color.parseColor("#E5E7EB"))
+            background = round(dp(10), if (initial) accent else color(pal.card))
             setPadding(dp(18), dp(6), dp(18), dp(6))
         }
         sw.setOnClickListener {
             val now = !((row.tag as? Boolean) ?: true); row.tag = now
             sw.text = if (now) "开" else "关"
             sw.setTextColor(if (now) Color.WHITE else sub)
-            sw.background = round(dp(10), if (now) accent else Color.parseColor("#E5E7EB"))
+            sw.background = round(dp(10), if (now) accent else color(pal.card))
+            onToggle?.invoke(now)
         }
         row.addView(lab); row.addView(sw)
         return row
@@ -625,7 +681,7 @@ class SettingsActivity : AppCompatActivity() {
 
     private fun card() = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        background = round(dp(14), Color.WHITE)
+        background = round(dp(14), color(pal.surface))
         setPadding(dp(14), dp(4), dp(14), dp(14))
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -636,7 +692,7 @@ class SettingsActivity : AppCompatActivity() {
     private fun pasteBtn(target: EditText) = TextView(this).apply {
         text = "粘贴"; textSize = 13f; gravity = Gravity.CENTER
         setTypeface(typeface, Typeface.BOLD)
-        setTextColor(accent); background = round(dp(10), Color.WHITE, stroke = true)
+        setTextColor(accent); background = round(dp(10), color(pal.surface), stroke = true)
         setPadding(dp(16), dp(6), dp(16), dp(6))
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(4) }
@@ -655,8 +711,8 @@ class SettingsActivity : AppCompatActivity() {
 
     private fun edit(value: String, hint: String, password: Boolean = false) = EditText(this).apply {
         setText(value); this.hint = hint; textSize = 14f; setTextColor(ink)
-        setHintTextColor(Color.parseColor("#9CA3AF"))
-        background = round(dp(8), Color.parseColor("#F3F4F6"))
+        setHintTextColor(color(pal.faint))
+        background = round(dp(8), color(pal.card))
         setPadding(dp(10), dp(10), dp(10), dp(10))
         // Masked, not VISIBLE_PASSWORD: an API key should not sit in plain sight.
         if (password) inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
@@ -680,7 +736,7 @@ class SettingsActivity : AppCompatActivity() {
     /** Outlined button sized for inside a card. */
     private fun cardBtn(label: String, onClick: () -> Unit) = TextView(this).apply {
         text = label; textSize = 14f; gravity = Gravity.CENTER; setTypeface(typeface, Typeface.BOLD)
-        setTextColor(accent); background = round(dp(10), Color.WHITE, stroke = true)
+        setTextColor(accent); background = round(dp(10), color(pal.surface), stroke = true)
         setPadding(dp(14), dp(10), dp(14), dp(10))
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(14) }

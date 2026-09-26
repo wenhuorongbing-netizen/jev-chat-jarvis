@@ -1,7 +1,10 @@
 package com.jev.probe.overlay
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
@@ -13,7 +16,6 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
-import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -21,9 +23,12 @@ import android.widget.TextView
 import android.widget.Toast
 import com.jev.probe.core.Analysis
 import com.jev.probe.core.BilingualResult
-import com.jev.probe.core.ChatSnapshot
 import com.jev.probe.core.Prefs
 import com.jev.probe.core.RankedReply
+import com.jev.probe.core.ui.OverlayRules
+import com.jev.probe.core.ui.OverlayRules.BubbleState
+import com.jev.probe.core.ui.UiTokens
+import com.jev.probe.core.ui.color
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -35,6 +40,9 @@ import kotlin.math.roundToInt
  * Design goals: let the chat show through (adjustable opacity), keep the signal
  * scannable (danger badge + intent headline + reply cards), and stay out of the
  * way (draggable bubble that snaps to the edge and remembers its position).
+ *
+ * Colors come from [UiTokens] (light/dark by system uiMode); bubble states from
+ * [OverlayRules]. No hex color literals live in this file.
  */
 class OverlayController(private val ctx: Context) {
 
@@ -47,6 +55,9 @@ class OverlayController(private val ctx: Context) {
     private var contentBox: LinearLayout? = null
     private var expanded = false
     private var lp: WindowManager.LayoutParams? = null
+
+    /** Current palette: re-read on every use so a uiMode flip is picked up. */
+    private val pal get() = UiTokens.palette(isDark())
 
     var onManualAnalyze: (() -> Unit)? = null
 
@@ -73,6 +84,10 @@ class OverlayController(private val ctx: Context) {
      *  can say so instead of silently showing "（未生成候选回复）". */
     private var replyError: String? = null
 
+    private fun isDark(): Boolean =
+        ctx.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+            Configuration.UI_MODE_NIGHT_YES
+
     private fun dp(v: Int) = TypedValue.applyDimension(
         TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), ctx.resources.displayMetrics).roundToInt()
 
@@ -81,16 +96,17 @@ class OverlayController(private val ctx: Context) {
     private val screenW get() = ctx.resources.displayMetrics.widthPixels
     private val screenH get() = ctx.resources.displayMetrics.heightPixels
 
-    /** Panel background: white with the user's opacity so the chat shows through. */
+    /** Panel background: palette.surface with the user's opacity so the chat shows through. */
     private fun panelBg(): Int {
         val a = (prefs.overlayOpacity / 100f * 255).roundToInt().coerceIn(150, 255)
-        return Color.argb(a, 255, 255, 255)
+        val s = color(pal.surface)
+        return Color.argb(a, Color.red(s), Color.green(s), Color.blue(s))
     }
 
     private fun card(radius: Int, color: Int, stroke: Boolean = false) = GradientDrawable().apply {
         cornerRadius = dp(radius).toFloat()
         setColor(color)
-        if (stroke) setStroke(dp(1), Color.parseColor("#22000000"))
+        if (stroke) setStroke(dp(1), Color.argb(34, 0, 0, 0))
     }
 
     // ---------------------------------------------------------------- window
@@ -106,7 +122,7 @@ class OverlayController(private val ctx: Context) {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = if (prefs.bubbleX in 0..(screenW - dp(52))) prefs.bubbleX else dp(8)
+            x = if (prefs.bubbleX in 0..(screenW - dp(BUBBLE))) prefs.bubbleX else dp(8)
             y = if (prefs.bubbleY >= 0) prefs.bubbleY else dp(150)
         }
         lp = params
@@ -124,19 +140,19 @@ class OverlayController(private val ctx: Context) {
 
     private fun buildBubble(params: WindowManager.LayoutParams): View {
         val wrap = FrameLayout(ctx).apply {
-            layoutParams = FrameLayout.LayoutParams(dp(52), dp(52))
+            layoutParams = FrameLayout.LayoutParams(dp(BUBBLE), dp(BUBBLE))
         }
         val b = TextView(ctx).apply {
             text = "Jev"
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-            textSize = 13f
+            textSize = 12f
             setTypeface(typeface, Typeface.BOLD)
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(Color.argb(235, 58, 122, 254))
+                setColor(color(pal.accent))
             }
-            layoutParams = FrameLayout.LayoutParams(dp(52), dp(52))
+            layoutParams = FrameLayout.LayoutParams(dp(BUBBLE), dp(BUBBLE))
         }
         val dot = View(ctx).apply {
             background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.TRANSPARENT) }
@@ -155,30 +171,35 @@ class OverlayController(private val ctx: Context) {
         val p = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
-            background = card(18, panelBg(), stroke = true)
+            background = card(UiTokens.RADIUS_PANEL, panelBg(), stroke = true)
             elevation = dp(8).toFloat()
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-            layoutParams = FrameLayout.LayoutParams(dp(316), FrameLayout.LayoutParams.WRAP_CONTENT).apply {
-                topMargin = dp(56) // sit just below the bubble
+            setPadding(dp(10), dp(6), dp(10), dp(8))
+            layoutParams = FrameLayout.LayoutParams(dp(PANEL_W), FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(BUBBLE + 4) // sit just below the bubble
             }
         }
-        // Header
+        // Header: one thin row — what language the other side wrote in, then icons.
         val header = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         header.addView(TextView(ctx).apply {
-            text = "Jev 分析"; setTextColor(Color.parseColor("#111827")); textSize = 15f
-            setTypeface(typeface, Typeface.BOLD)
+            text = ""; setTextColor(color(pal.faint)); textSize = 11f
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        })
+        }.also { headerLabel = it })
+        header.addView(iconBtn("↻") { onManualAnalyze?.invoke() })
         header.addView(iconBtn("⚙") { openSettings() })
         header.addView(iconBtn("✕") { toggle() })
         p.addView(header)
 
-        val scroll = ScrollView(ctx).apply {
+        // Wraps its content; scrolls only past 55% of the screen, so a normal
+        // result (translation + 3 short replies) never needs scrolling.
+        val scroll = object : ScrollView(ctx) {
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                val cap = View.MeasureSpec.makeMeasureSpec((screenH * 0.55f).roundToInt(), View.MeasureSpec.AT_MOST)
+                super.onMeasure(widthMeasureSpec, cap)
+            }
+        }.apply {
             isVerticalScrollBarEnabled = false
-            // Cap the height so the panel stays in the upper area and does not
-            // cover the WeChat input box / keyboard. Scroll inside if taller.
             layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, (screenH * 0.40f).roundToInt()).apply { topMargin = dp(6) }
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
         val content = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
         scroll.addView(content)
@@ -188,9 +209,11 @@ class OverlayController(private val ctx: Context) {
         return p
     }
 
+    private var headerLabel: TextView? = null
+
     private fun iconBtn(glyph: String, onClick: () -> Unit) = TextView(ctx).apply {
-        text = glyph; setTextColor(Color.parseColor("#6B7280")); textSize = 16f
-        setPadding(dp(10), dp(2), dp(6), dp(2))
+        text = glyph; setTextColor(color(pal.faint)); textSize = 14f
+        setPadding(dp(9), dp(2), dp(5), dp(2))
         setOnClickListener { onClick() }
     }
 
@@ -239,8 +262,13 @@ class OverlayController(private val ctx: Context) {
             background = card(12, panelBg(), stroke = true)
             elevation = dp(8).toFloat()
             setPadding(dp(4), dp(4), dp(4), dp(4))
-            layoutParams = FrameLayout.LayoutParams(dp(196), ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(56) }
+            layoutParams = FrameLayout.LayoutParams(dp(196), ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(BUBBLE + 4) }
         }
+        val auto = prefs.autoAnalyze
+        menu.addView(menuItem(if (auto) "新消息自动生成：开（点关）" else "新消息自动生成：关（点开）") {
+            prefs.autoAnalyze = !auto; root?.removeView(menu)
+            toast(if (auto) "已关闭：点气泡才生成" else "已开启：来新消息就在后台生成")
+        })
         menu.addView(menuItem("截屏识别一次") { root?.removeView(menu); onOcrCapture?.invoke() })
         menu.addView(menuItem("把当前会话存为联系人") { onSaveContact?.invoke(); root?.removeView(menu) })
         menu.addView(menuItem("打开设置") { openSettings(); root?.removeView(menu) })
@@ -250,7 +278,7 @@ class OverlayController(private val ctx: Context) {
     }
 
     private fun menuItem(label: String, onClick: () -> Unit) = TextView(ctx).apply {
-        text = label; setTextColor(Color.parseColor("#111827")); textSize = 14f
+        text = label; setTextColor(color(pal.ink)); textSize = 14f
         setPadding(dp(12), dp(10), dp(12), dp(10)); setOnClickListener { onClick() }
     }
 
@@ -265,9 +293,37 @@ class OverlayController(private val ctx: Context) {
     private var collapsedX = dp(6)
     private var collapsedY = dp(150)
 
+    /** True while an expand/collapse animation is in flight. */
+    private var panelAnimating = false
+
     private fun toggle() {
-        expanded = !expanded
         val params = lp ?: return
+        val p = panel
+        if (panelAnimating && p != null) {
+            // Toggled mid-animation: stop the running one quietly and jump
+            // straight to the final state of this toggle — never stack a
+            // second animation on top of the first.
+            p.animate().setListener(null).cancel()
+            panelAnimating = false
+            expanded = !expanded
+            if (expanded) {
+                // collapsedX/collapsedY already hold the bubble's spot from the
+                // original expand — params.x is the panel position right now, so
+                // re-saving it here would strand the bubble at the panel corner.
+                params.x = dp(6)
+                val maxTop = (screenH * 0.14f).roundToInt()
+                if (params.y > maxTop) params.y = maxTop
+                p.visibility = View.VISIBLE; p.alpha = 1f; p.translationY = 0f
+                if (!hasResult && !loading) root?.post { onManualAnalyze?.invoke() }
+            } else {
+                p.visibility = View.GONE; p.alpha = 1f; p.translationY = 0f
+                params.x = collapsedX; params.y = collapsedY
+            }
+            android.util.Log.d("JEVASSIST", "overlay: toggle expanded=$expanded x=${params.x} y=${params.y} saved=($collapsedX,$collapsedY)")
+            root?.let { runCatching { wm.updateViewLayout(it, params) } }
+            return
+        }
+        expanded = !expanded
         if (expanded) {
             // Open the panel from the left, fully on-screen and up high (clear of the
             // input box), regardless of which edge the bubble was snapped to.
@@ -275,26 +331,75 @@ class OverlayController(private val ctx: Context) {
             params.x = dp(6)
             val maxTop = (screenH * 0.14f).roundToInt()
             if (params.y > maxTop) params.y = maxTop
-            panel?.visibility = View.VISIBLE
+            if (p != null) {
+                panelAnimating = true
+                p.visibility = View.VISIBLE
+                p.alpha = 0f
+                p.translationY = dp(8).toFloat()
+                p.animate().alpha(1f).translationY(0f).setDuration(140)
+                    .setListener(object : AnimatorListenerAdapter() {
+                        override fun onAnimationEnd(animation: Animator) {
+                            p.alpha = 1f; p.translationY = 0f
+                            panelAnimating = false
+                        }
+                        override fun onAnimationCancel(animation: Animator) { panelAnimating = false }
+                    })
+                    .start()
+            }
+            // Opening with nothing ready for this chat = "generate now".
+            if (!hasResult && !loading) root?.post { onManualAnalyze?.invoke() }
+            android.util.Log.d("JEVASSIST", "overlay: toggle expanded=$expanded x=${params.x} y=${params.y} saved=($collapsedX,$collapsedY)")
+            root?.let { runCatching { wm.updateViewLayout(it, params) } }
         } else {
-            panel?.visibility = View.GONE
-            params.x = collapsedX; params.y = collapsedY  // bubble returns to where it was
+            // Collapse: hide the panel and hand the window position back to the
+            // bubble only after the 140ms fade+slide has finished.
+            if (p != null && p.visibility == View.VISIBLE) {
+                panelAnimating = true
+                p.animate().alpha(0f).translationY(dp(8).toFloat()).setDuration(140)
+                    .setListener(object : AnimatorListenerAdapter() {
+                        override fun onAnimationEnd(animation: Animator) { finishCollapse(p, params) }
+                        override fun onAnimationCancel(animation: Animator) { panelAnimating = false }
+                    })
+                    .start()
+            } else {
+                params.x = collapsedX; params.y = collapsedY  // bubble returns to where it was
+                root?.let { runCatching { wm.updateViewLayout(it, params) } }
+            }
+            android.util.Log.d("JEVASSIST", "overlay: toggle expanded=$expanded x=${params.x} y=${params.y} saved=($collapsedX,$collapsedY)")
         }
-        android.util.Log.d("JEVASSIST", "overlay: toggle expanded=$expanded x=${params.x} y=${params.y} saved=($collapsedX,$collapsedY)")
+    }
+
+    private fun finishCollapse(p: View, params: WindowManager.LayoutParams) {
+        panelAnimating = false
+        p.visibility = View.GONE
+        p.alpha = 1f; p.translationY = 0f
+        params.x = collapsedX; params.y = collapsedY
         root?.let { runCatching { wm.updateViewLayout(it, params) } }
     }
 
     // ------------------------------------------------------------ public API
 
     fun showIdle(title: String?) {
-        ensureRoot(); bubble?.alpha = 0.55f
-        // Either there is genuinely nothing to show yet, or the panel is empty
-        // for some other reason (root got rebuilt after hide(), leaving
-        // contentBox with zero children while lastJudgment still points at a
-        // stale conversation) — either way an empty panel must never stay
-        // literally blank.
-        if (lastJudgment == null || contentBox?.childCount == 0) {
-            setContent(listOf(bigButton("分析当前对话") { onManualAnalyze?.invoke() }))
+        ensureRoot()
+        if (!hasResult && !loading) setBubble(BubbleState.IDLE)
+        // An empty panel must never stay literally blank (root may have been
+        // rebuilt after hide()).
+        if (contentBox?.childCount == 0) setContent(listOf(hint("点 ↻ 生成回复")))
+    }
+
+    /** hasResult: the panel holds replies for the current chat; loading: a round is in flight. */
+    private var hasResult = false
+    private var loading = false
+
+    /** The bubble carries the state, so the panel never has to pop open by itself. */
+    private fun setBubble(s: BubbleState) {
+        val b = bubble ?: return
+        val visual = OverlayRules.bubbleVisual(s)
+        b.text = visual.label
+        b.alpha = visual.alpha
+        b.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(color(if (visual.danger) pal.danger else pal.accent))
         }
     }
 
@@ -311,25 +416,43 @@ class OverlayController(private val ctx: Context) {
         lastFill = null
         noteText = null
         replyError = null
+        hasResult = false; loading = false
+        headerLabel?.text = ""
         contentBox?.removeAllViews()
+        setBubble(BubbleState.IDLE)
     }
 
     private fun bigButton(label: String, onClick: () -> Unit) = TextView(ctx).apply {
         text = label; textSize = 14f; gravity = Gravity.CENTER
         setTextColor(Color.WHITE); setTypeface(typeface, Typeface.BOLD)
-        background = card(12, Color.parseColor("#3A7AFE"))
+        background = card(12, color(pal.accent))
         setPadding(dp(12), dp(11), dp(12), dp(11))
         layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(6) }
         setOnClickListener { onClick() }
     }
 
-    fun showLoading() {
-        ensureRoot(); bubble?.alpha = 1f
+    /** Loading placeholder: three quiet skeleton cards, no shimmer. */
+    private fun skeletonCards(): List<View> = (1..3).map {
+        View(ctx).apply {
+            background = card(UiTokens.RADIUS_CARD, color(pal.card))
+            alpha = 0.6f
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(44)).apply { topMargin = dp(5) }
+        }
+    }
+
+    /** [open]: legacy Jev mode still opens the panel; bilingual mode only
+     *  animates the bubble and waits for the user to tap it. */
+    fun showLoading(open: Boolean = false) {
+        ensureRoot()
         ctxNotes = 0; ctxHistory = 0   // counts for the round that is starting
         replyError = null              // this round has not failed (yet)
-        setContent(listOf(hint("分析中…")))
-        if (!expanded) toggle()
+        loading = true; hasResult = false
+        setBubble(BubbleState.LOADING)
+        setContent(skeletonCards())
+        if (open && !expanded) toggle()
     }
 
     /** How many knowledge notes / history lines went into the pending analysis. */
@@ -351,10 +474,25 @@ class OverlayController(private val ctx: Context) {
     }
 
     fun showError(msg: String) {
-        ensureRoot(); bubble?.alpha = 1f
-        setContent(listOf(
-            line("出错了", "#DC2626", 14f, true),
-            hint(msg)))
+        ensureRoot()
+        loading = false; hasResult = true  // tapping shows the error instead of retrying blindly
+        setBubble(BubbleState.ERROR)
+        val ev = OverlayRules.errorView(msg, prefs.effectiveReplyKey().isNotBlank())
+        val views = ArrayList<View>()
+        views.add(line(ev.message, color(pal.danger), 14f, true))
+        // The raw message only gets its own hint line when the human-readable
+        // line does not already carry it.
+        if (ev.message != msg && !ev.message.contains(msg.take(80))) views.add(hint(msg))
+        ev.actionLabel?.let { label ->
+            views.add(bigButton(label) {
+                when (ev.action) {
+                    OverlayRules.ErrorAction.OPEN_SETTINGS -> openSettings()
+                    OverlayRules.ErrorAction.RETRY -> onManualAnalyze?.invoke()
+                    OverlayRules.ErrorAction.NONE -> {}
+                }
+            })
+        }
+        setContent(views)
     }
 
     /**
@@ -368,7 +506,7 @@ class OverlayController(private val ctx: Context) {
         ensureRoot(); bubble?.alpha = 1f
         resetForNewConversation()
         setContent(listOf(
-            line("提示", "#3A7AFE", 14f, true),
+            line("提示", color(pal.accent), 14f, true),
             hint(msg)))
         if (!expanded) toggle()
     }
@@ -389,29 +527,29 @@ class OverlayController(private val ctx: Context) {
     /** Bilingual mode: translation of the other side, then 3 target-language
      *  replies with Chinese glosses. "填入" fills only the target-language text. */
     fun showBilingual(r: BilingualResult, onFill: (String) -> Unit) {
-        ensureRoot(); bubble?.alpha = 1f
+        ensureRoot()
         // 不透明：候选回复要读清楚，聊天内容透过来会和中文释义叠在一起
-        panel?.background = card(18, Color.WHITE, stroke = true)
+        panel?.background = card(UiTokens.RADIUS_PANEL, color(pal.surface), stroke = true)
         lastFill = onFill
         lastJudgment = null
-        val lang = r.lang.ifBlank { "对方的语言" }
+        loading = false; hasResult = true
+        setBubble(BubbleState.READY)
+        val zhOnly = r.lang.isBlank() || r.lang == "中文"
+        headerLabel?.text = if (zhOnly) "点一条填入 · 长按复制" else "对方 · ${r.lang}　点一条填入"
         val views = ArrayList<View>()
-        views.add(hint(
-            if (ctxNotes == 0 && ctxHistory == 0) "智能回复 · 未用知识库"
-            else "智能回复 · 知识库 $ctxNotes 条 · 历史 $ctxHistory 条"))
-        noteText?.let { if (it.isNotBlank()) views.add(hint(it)) }
-        views.add(line("对方说 · $lang", "#9CA3AF", 12f))
-        if (r.translation.isNotBlank()) views.add(line(r.translation, "#111827", 15f, true))
-        views.add(line(if (lang == "中文") "候选回复" else "候选回复（填入只填$lang）", "#9CA3AF", 12f))
-        r.replies.forEachIndexed { i, reply -> views.add(replyCard(i + 1, reply.text, -1, onFill, reply.zh)) }
-        // 分析放在候选后面：它常有好几行，放前面会把候选挤出面板
-        if (r.analysis.isNotBlank()) {
-            views.add(divider())
-            views.add(line("💡 ${r.analysis}", "#6B7280", 12.5f))
+        if (r.translation.isNotBlank()) views.add(line(r.translation, color(pal.ink), UiTokens.TEXT_TRANS, true))
+        r.replies.forEachIndexed { i, reply ->
+            // 中文对话或释义与正文相同时不显示灰字（与 Windows P0-1 同规则）
+            val gloss = if (OverlayRules.shouldShowGloss(r.lang, reply.zh, reply.text)) reply.zh else ""
+            views.add(replyCard(i + 1, reply.text, -1, onFill, gloss))
         }
-        views.add(reAnalyzeBtn())
+        // 次要信息放最底下、字最小：分析一句话，其余是来源说明
+        if (r.analysis.isNotBlank()) views.add(line(r.analysis, color(pal.sub), UiTokens.TEXT_AUX).apply { setPadding(0, dp(6), 0, 0) })
+        val meta = ArrayList<String>()
+        if (ctxNotes > 0 || ctxHistory > 0) meta.add("知识库 $ctxNotes · 历史 $ctxHistory")
+        noteText?.takeIf { it.isNotBlank() }?.let { meta.add(it) }
+        if (meta.isNotEmpty()) views.add(line(meta.joinToString(" · "), color(pal.faint), UiTokens.TEXT_META))
         setContent(views)
-        if (!expanded) toggle()
     }
 
     fun toast(msg: String) = Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
@@ -420,6 +558,8 @@ class OverlayController(private val ctx: Context) {
         val r = root ?: return
         runCatching { wm.removeView(r) }
         root = null; bubble = null; panel = null; contentBox = null; dangerDot = null; expanded = false
+        hasResult = false; loading = false; headerLabel = null
+        panelAnimating = false
     }
 
     // --------------------------------------------------------------- rendering
@@ -431,7 +571,8 @@ class OverlayController(private val ctx: Context) {
 
     private fun render(a: Analysis, generating: Boolean) {
         ensureRoot(); bubble?.alpha = 1f
-        panel?.background = card(18, panelBg(), stroke = true) // re-apply in case opacity changed
+        loading = generating; hasResult = true
+        panel?.background = card(UiTokens.RADIUS_PANEL, panelBg(), stroke = true) // re-apply in case opacity changed
         val views = ArrayList<View>()
 
         // What context this read was based on (knowledge base / remembered history).
@@ -450,7 +591,7 @@ class OverlayController(private val ctx: Context) {
         }
         // Intent headline.
         a.trueIntent?.let {
-            views.add(line("对方真实意图：${INTENT[it.choice] ?: it.choice}", "#111827", 15f, true))
+            views.add(line("对方真实意图：${INTENT[it.choice] ?: it.choice}", color(pal.ink), 15f, true))
             views.add(hint("把握 ${(it.confidence * 100).roundToInt()}%"))
         }
         // Compact secondary line: needs · action · reply-now.
@@ -458,13 +599,13 @@ class OverlayController(private val ctx: Context) {
         a.sheNeeds?.let { bits.add("要${(NEEDS[it.choice] ?: it.choice)}") }
         a.bestAction?.let { bits.add(ACTION[it.choice] ?: it.choice) }
         a.shouldReplyNow?.let { bits.add(if (it >= 0.5) "可给实质" else "先别给实质") }
-        if (bits.isNotEmpty()) views.add(line(bits.joinToString("  ·  "), "#374151", 13f))
-        a.tensionResolved?.let { if (it >= 0.7) views.add(line("✓ 紧张已缓解", "#16A34A", 12f)) }
+        if (bits.isNotEmpty()) views.add(line(bits.joinToString("  ·  "), color(pal.sub), 13f))
+        a.tensionResolved?.let { if (it >= 0.7) views.add(line("✓ 紧张已缓解", color(pal.ok), 12f)) }
 
         views.add(divider())
-        views.add(line("候选回复（Jev 排序）", "#9CA3AF", 12f))
+        views.add(line("候选回复（Jev 排序）", color(pal.faint), 12f))
         if (generating) {
-            views.add(hint("生成中…"))
+            views.addAll(skeletonCards())
         } else {
             val fill = lastFill ?: {}
             a.rankedReplies.forEachIndexed { i, r ->
@@ -502,41 +643,46 @@ class OverlayController(private val ctx: Context) {
 
     private fun replyCard(rank: Int, text: String, pct: Int, onFill: (String) -> Unit, zh: String = ""): View {
         val top = rank == 1
-        val cardBg = if (top) Color.parseColor("#EAF1FF") else Color.parseColor("#F3F4F6")
+        val cardBg = color(if (top) pal.accentSoft else pal.card)
         val c = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
-            background = card(12, cardBg)
-            setPadding(dp(10), dp(8), dp(10), dp(8))
+            background = card(UiTokens.RADIUS_CARD, cardBg)
+            setPadding(dp(9), dp(6), dp(9), dp(6))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(6) }
+            ).apply { topMargin = dp(5) }
+            // The whole card is the button: tap fills (then collapses so the input
+            // box is visible to review and send), long-press copies.
+            isClickable = true
+            setOnClickListener {
+                android.util.Log.d("JEVASSIST", "overlay: fill tapped")
+                onFill(text)
+                toast("已填入，确认后自己发送")
+                if (expanded) toggle()
+            }
+            setOnLongClickListener { copy(text); true }
         }
-        c.addView(TextView(ctx).apply {
-            this.text = if (pct < 0) (if (top) "#$rank · 推荐" else "#$rank") else "#$rank · ${pct}%"
-            setTextColor(Color.parseColor("#3A7AFE")); textSize = 11f
+        if (pct >= 0) c.addView(TextView(ctx).apply {
+            this.text = "#$rank · ${pct}%"
+            setTextColor(color(pal.accent)); textSize = UiTokens.TEXT_META
             setTypeface(typeface, Typeface.BOLD)
         })
         c.addView(TextView(ctx).apply {
-            this.text = text; setTextColor(Color.parseColor("#111827")); textSize = 14f
-            setPadding(0, dp(3), 0, if (zh.isBlank()) dp(7) else dp(2)); setLineSpacing(dp(2).toFloat(), 1f)
+            this.text = text; setTextColor(color(pal.ink)); textSize = UiTokens.TEXT_BODY
+            setLineSpacing(dp(1).toFloat(), 1f)
         })
         if (zh.isNotBlank()) c.addView(TextView(ctx).apply {
-            this.text = zh; setTextColor(Color.parseColor("#6B7280")); textSize = 12.5f
-            setPadding(0, 0, 0, dp(7))
+            this.text = zh; setTextColor(color(pal.sub)); textSize = UiTokens.TEXT_AUX
+            setPadding(0, dp(1), 0, 0)
         })
-        val btns = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
-        btns.addView(pill("复制", false) { copy(text) })
-        // Fill, then collapse so the input box + keyboard are visible to review/send.
-        btns.addView(pill("填入", true) { android.util.Log.d("JEVASSIST", "overlay: fill tapped"); onFill(text); if (expanded) toggle() })
-        c.addView(btns)
         return c
     }
 
     private fun pill(label: String, primary: Boolean, onClick: () -> Unit) = TextView(ctx).apply {
         text = label; textSize = 13f; gravity = Gravity.CENTER
         setTypeface(typeface, Typeface.BOLD)
-        setTextColor(if (primary) Color.WHITE else Color.parseColor("#3A7AFE"))
-        background = card(18, if (primary) Color.parseColor("#3A7AFE") else Color.parseColor("#FFFFFF"), stroke = !primary)
+        setTextColor(if (primary) Color.WHITE else color(pal.accent))
+        background = card(18, color(if (primary) pal.accent else pal.surface), stroke = !primary)
         setPadding(dp(18), dp(6), dp(18), dp(6))
         layoutParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
@@ -546,7 +692,7 @@ class OverlayController(private val ctx: Context) {
 
     private fun reAnalyzeBtn() = TextView(ctx).apply {
         text = "重新分析"; textSize = 13f; gravity = Gravity.CENTER
-        setTextColor(Color.parseColor("#6B7280"))
+        setTextColor(color(pal.sub))
         setPadding(dp(10), dp(10), dp(10), dp(4))
         setOnClickListener { onManualAnalyze?.invoke() }
     }
@@ -560,17 +706,17 @@ class OverlayController(private val ctx: Context) {
 
     // --------------------------------------------------------------- helpers
 
-    private fun line(text: String, color: String, size: Float, bold: Boolean = false) =
+    private fun line(text: String, colorInt: Int, size: Float, bold: Boolean = false) =
         TextView(ctx).apply {
-            this.text = text; setTextColor(Color.parseColor(color)); textSize = size
+            this.text = text; setTextColor(colorInt); textSize = size
             if (bold) setTypeface(typeface, Typeface.BOLD)
             setPadding(0, dp(2), 0, dp(2))
         }
 
-    private fun hint(text: String) = line(text, "#9CA3AF", 12f)
+    private fun hint(text: String) = line(text, color(pal.faint), 12f)
 
     private fun divider() = View(ctx).apply {
-        setBackgroundColor(Color.parseColor("#1F000000"))
+        setBackgroundColor(Color.argb(31, 0, 0, 0))
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)).apply {
             topMargin = dp(8); bottomMargin = dp(4)
         }
@@ -583,9 +729,9 @@ class OverlayController(private val ctx: Context) {
     }
 
     private fun dangerColor(lvl: Int): Int = when {
-        lvl >= 6 -> Color.parseColor("#DC2626")
-        lvl >= 3 -> Color.parseColor("#D97706")
-        else -> Color.parseColor("#16A34A")
+        lvl >= 6 -> color(pal.danger)
+        lvl >= 3 -> color(pal.warn)
+        else -> color(pal.ok)
     }
 
     private fun dangerWord(lvl: Int): String = when {
@@ -596,6 +742,9 @@ class OverlayController(private val ctx: Context) {
     }
 
     companion object {
+        private const val BUBBLE = 44
+        private const val PANEL_W = 292
+
         private val INTENT = mapOf(
             "confirm_you_care" to "确认你在不在乎", "vent_anger" to "在发泄情绪",
             "request_action" to "要你办事", "seek_explanation" to "要个解释",
