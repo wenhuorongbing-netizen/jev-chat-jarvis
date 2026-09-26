@@ -120,20 +120,20 @@ class OverlayRulesTest {
     }
 
     @Test
-    fun `errorView fallback keeps raw message and retries`() {
+    fun `errorView fallback is a generic human line and retries`() {
         val v = OverlayRules.errorView("boom", hasReplyKey = true)
-        assertEquals("出错了：boom", v.message)
+        assertEquals("出错了，稍后再试", v.message)
         assertEquals(ErrorAction.RETRY, v.action)
         assertEquals("重试", v.actionLabel)
     }
 
     @Test
-    fun `errorView fallback truncates raw to 80 chars`() {
-        val raw = "x".repeat(200)
-        val v = OverlayRules.errorView(raw, hasReplyKey = true)
-        assertEquals("出错了：" + raw.take(80), v.message)
-        assertEquals(ErrorAction.RETRY, v.action)
-        assertEquals("重试", v.actionLabel)
+    fun `errorView never leaks the raw message into the UI`() {
+        // SPEC A3：原始错误信息不进 UI——无论长短、是否含可疑内容。
+        listOf("boom", "x".repeat(200), "HTTP 500 internal: sk-abc123secret").forEach { raw ->
+            val v = OverlayRules.errorView(raw, hasReplyKey = true)
+            assertFalse("raw leaked into UI message: $raw", v.message.contains(raw.take(20)))
+        }
     }
 
     @Test

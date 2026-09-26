@@ -12,8 +12,10 @@ import android.text.InputType
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.animation.OvershootInterpolator
 import android.widget.EditText
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
@@ -70,12 +72,23 @@ class SettingsActivity : AppCompatActivity() {
         val scroll = ScrollView(this)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(22), dp(18), dp(28))
+            setPadding(dp(20), dp(24), dp(20), dp(28))
         }
         root.padForSystemBars()   // edge-to-edge: keep the title off the status bar
         scroll.addView(root)
 
         root.addView(header("设置"))
+
+        // =================== 关于我 ===================
+        // SPEC A5：第一屏第一张业务卡（标题栏/说明除外）。保存在底部统一进行。
+        val aboutMeCard = card()
+        aboutMeCard.addView(label("关于我（回复会照这个人的口吻写）"))
+        val aboutEdit = edit(prefs.aboutMe, "例：在德国生活的中国人，做什么工作，说话随意简短，不爱用表情，德语什么水平").apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE; minLines = 2
+        }
+        aboutMeCard.addView(aboutEdit)
+        aboutMeCard.addView(text("另外会自动学你真实发出去的消息（长度、语气、标点），只存在手机本地。", 11f, sub))
+        root.addView(aboutMeCard)
 
         // =================== 接口 ===================
         root.addView(section("接口"))
@@ -108,7 +121,7 @@ class SettingsActivity : AppCompatActivity() {
         val bochaRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(10), 0, dp(2))
+            setPadding(0, dp(12), 0, dp(4))
         }
         bochaRow.addView(text("${Prefs.DEFAULT_JUDGE_BASE_BOCHA}（限时免费）", 12.5f, ink).apply {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
@@ -117,7 +130,7 @@ class SettingsActivity : AppCompatActivity() {
             text = "复制"; textSize = 13f; gravity = Gravity.CENTER
             setTypeface(typeface, Typeface.BOLD)
             setTextColor(accent); background = round(dp(10), color(pal.surface), stroke = true)
-            setPadding(dp(16), dp(6), dp(16), dp(6))
+            setPadding(dp(16), dp(8), dp(16), dp(8))
             setOnClickListener {
                 val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
                 cm.setPrimaryClip(android.content.ClipData.newPlainText(
@@ -336,7 +349,15 @@ class SettingsActivity : AppCompatActivity() {
         val foldBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(2), dp(16), dp(2), dp(0))
+            setPadding(dp(4), dp(16), dp(4), dp(0))
+            // v2 施工 8：整行按压反馈（alpha 瞬态），返回 false 不吞 click。
+            setOnTouchListener { v, ev ->
+                when (ev.action) {
+                    MotionEvent.ACTION_DOWN -> v.alpha = 0.6f
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.alpha = 1f
+                }
+                false
+            }
             setOnClickListener { setAdvancedFolded(!advancedFolded) }
         }
         foldBar.addView(text("高级：判断接口 · 识图接口", 13f, sub, bold = true).apply {
@@ -350,12 +371,7 @@ class SettingsActivity : AppCompatActivity() {
         // =================== 分析 ===================
         root.addView(section("分析"))
         val card2 = card()
-        card2.addView(label("关于我（回复会照这个人的口吻写）"))
-        val aboutEdit = edit(prefs.aboutMe, "例：在德国生活的中国人，做什么工作，说话随意简短，不爱用表情，德语什么水平").apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE; minLines = 2
-        }
-        card2.addView(aboutEdit)
-        card2.addView(text("另外会自动学你真实发出去的消息（长度、语气、标点），只存在手机本地。", 11f, sub))
+        // 「关于我」已上移到第一屏独立成卡（SPEC A5），本卡从关系描述开始。
         card2.addView(label("关系描述（给 Jev 判断用）"))
         val relEdit = edit(prefs.relationship, Prefs.DEFAULT_REL)
         card2.addView(relEdit)
@@ -414,7 +430,7 @@ class SettingsActivity : AppCompatActivity() {
         })
         // Deliberately low-key: a developer aid, not a user feature.
         card2.addView(text("自检", 12f, sub).apply {
-            setPadding(dp(2), dp(12), dp(8), dp(2))
+            setPadding(dp(4), dp(12), dp(8), dp(4))
             setOnClickListener {
                 kbResult.text = "自检中…"
                 worker.execute {
@@ -454,7 +470,7 @@ class SettingsActivity : AppCompatActivity() {
             12f, sub))
         aboutCard.addView(cardBtn("隐私政策") { openUrl(PRIVACY_URL) })
         aboutCard.addView(cardBtn("开源仓库") { openUrl(REPO_URL) })
-        aboutCard.addView(text(versionLabel(), 11f, sub).apply { setPadding(0, dp(10), 0, dp(2)) })
+        aboutCard.addView(text(versionLabel(), 11f, sub).apply { setPadding(0, dp(12), 0, dp(4)) })
         root.addView(aboutCard)
 
         // =================== 保存 ===================
@@ -613,10 +629,10 @@ class SettingsActivity : AppCompatActivity() {
         options.forEachIndexed { i, opt ->
             val pill = TextView(this).apply {
                 text = opt; textSize = 12.5f; gravity = Gravity.CENTER
-                setPadding(dp(13), dp(7), dp(13), dp(7))
+                setPadding(dp(12), dp(8), dp(12), dp(8))
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = dp(7) }
+                    ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = dp(8) }
             }
             views.add(pill)
             pill.setOnClickListener {
@@ -631,7 +647,7 @@ class SettingsActivity : AppCompatActivity() {
             addView(row)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) }
+                ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(12) }
         }
         return scroller
     }
@@ -639,7 +655,8 @@ class SettingsActivity : AppCompatActivity() {
     private fun paintPill(v: TextView, on: Boolean) {
         v.setTextColor(if (on) Color.WHITE else sub)
         v.setTypeface(v.typeface, if (on) Typeface.BOLD else Typeface.NORMAL)
-        v.background = round(dp(9), if (on) accent else pillOff)
+        // v2 施工 6：选中态换渐变，未选中保持 pal.card。
+        v.background = if (on) accentGradientBg(9) else round(dp(9), pillOff)
     }
 
     private fun toggleRow(
@@ -649,7 +666,7 @@ class SettingsActivity : AppCompatActivity() {
     ): LinearLayout {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(12), 0, dp(2)); tag = initial
+            setPadding(0, dp(12), 0, dp(4)); tag = initial
         }
         val lab = text(labelText, 14f, ink).apply {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
@@ -658,14 +675,15 @@ class SettingsActivity : AppCompatActivity() {
             text = if (initial) "开" else "关"; textSize = 13f; gravity = Gravity.CENTER
             setTypeface(typeface, Typeface.BOLD)
             setTextColor(if (initial) Color.WHITE else sub)
-            background = round(dp(10), if (initial) accent else color(pal.card))
-            setPadding(dp(18), dp(6), dp(18), dp(6))
+            // v2 施工 6：toggle 选中态换渐变，未选中保持 pal.card。
+            background = if (initial) accentGradientBg(10) else round(dp(10), color(pal.card))
+            setPadding(dp(20), dp(8), dp(20), dp(8))
         }
         sw.setOnClickListener {
             val now = !((row.tag as? Boolean) ?: true); row.tag = now
             sw.text = if (now) "开" else "关"
             sw.setTextColor(if (now) Color.WHITE else sub)
-            sw.background = round(dp(10), if (now) accent else color(pal.card))
+            sw.background = if (now) accentGradientBg(10) else round(dp(10), color(pal.card))
             onToggle?.invoke(now)
         }
         row.addView(lab); row.addView(sw)
@@ -674,18 +692,24 @@ class SettingsActivity : AppCompatActivity() {
 
     // atoms
     private fun header(t: String) = text(t, 24f, ink, bold = true).apply { setPadding(0, 0, 0, dp(4)) }
-    private fun section(t: String) = text(t, 12f, sub, bold = true).apply { setPadding(dp(2), dp(16), 0, dp(6)) }
+    // v2.3：section 标题 12sp 粗体 + letterSpacing 0.08，颜色 faint。
+    private fun section(t: String) = text(t, 12f, color(pal.faint), bold = true).apply {
+        letterSpacing = 0.08f
+        setPadding(dp(4), dp(16), 0, dp(8))
+    }
     private fun label(t: String) = text(t, 13f, ink, bold = true).apply { setPadding(0, dp(12), 0, dp(4)) }
-    private fun cardTitle(t: String) = text(t, 16f, ink, bold = true).apply { setPadding(0, dp(10), 0, dp(4)) }
-    private fun resultText() = text("", 12.5f, sub).apply { setPadding(0, dp(10), 0, dp(2)) }
+    private fun cardTitle(t: String) = text(t, 16f, ink, bold = true).apply { setPadding(0, dp(12), 0, dp(4)) }
+    private fun resultText() = text("", 12.5f, sub).apply { setPadding(0, dp(12), 0, dp(4)) }
 
     private fun card() = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         background = round(dp(14), color(pal.surface))
-        setPadding(dp(14), dp(4), dp(14), dp(14))
+        elevation = dp(2).toFloat()   // v2.3：卡片柔和投影
+        clipToOutline = true
+        setPadding(dp(16), dp(4), dp(16), dp(16))
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            .apply { topMargin = dp(10) }
+            .apply { topMargin = dp(12) }
     }
 
     /** 有些 ROM 的安全键盘在密码框里不给粘贴，单独放一个按钮：只读剪贴板写进输入框，不显示内容。 */
@@ -693,7 +717,7 @@ class SettingsActivity : AppCompatActivity() {
         text = "粘贴"; textSize = 13f; gravity = Gravity.CENTER
         setTypeface(typeface, Typeface.BOLD)
         setTextColor(accent); background = round(dp(10), color(pal.surface), stroke = true)
-        setPadding(dp(16), dp(6), dp(16), dp(6))
+        setPadding(dp(16), dp(8), dp(16), dp(8))
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(4) }
         setOnClickListener {
@@ -713,11 +737,11 @@ class SettingsActivity : AppCompatActivity() {
         setText(value); this.hint = hint; textSize = 14f; setTextColor(ink)
         setHintTextColor(color(pal.faint))
         background = round(dp(8), color(pal.card))
-        setPadding(dp(10), dp(10), dp(10), dp(10))
+        setPadding(dp(12), dp(12), dp(12), dp(12))
         // Masked, not VISIBLE_PASSWORD: an API key should not sit in plain sight.
         if (password) inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(2) }
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(4) }
     }
 
     private fun text(t: String, size: Float, color: Int, bold: Boolean = false) = TextView(this).apply {
@@ -726,10 +750,12 @@ class SettingsActivity : AppCompatActivity() {
 
     private fun primaryBtn(label: String, onClick: () -> Unit) = TextView(this).apply {
         text = label; textSize = 15f; gravity = Gravity.CENTER; setTypeface(typeface, Typeface.BOLD)
-        setTextColor(Color.WHITE); background = round(dp(12), accent)
-        setPadding(dp(16), dp(13), dp(16), dp(13))
+        // v2.1：主按钮改 accentLight → accent 渐变，圆角不变；按压回弹见 pressBounce。
+        setTextColor(Color.WHITE); background = accentGradientBg(12)
+        setPadding(dp(16), dp(12), dp(16), dp(12))
         layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(18) }
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(20) }
+        pressBounce()
         setOnClickListener { onClick() }
     }
 
@@ -737,10 +763,30 @@ class SettingsActivity : AppCompatActivity() {
     private fun cardBtn(label: String, onClick: () -> Unit) = TextView(this).apply {
         text = label; textSize = 14f; gravity = Gravity.CENTER; setTypeface(typeface, Typeface.BOLD)
         setTextColor(accent); background = round(dp(10), color(pal.surface), stroke = true)
-        setPadding(dp(14), dp(10), dp(14), dp(10))
+        setPadding(dp(16), dp(12), dp(16), dp(12))
         layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(14) }
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(16) }
         setOnClickListener { onClick() }
+    }
+
+    /** v2.1 主按钮渐变：accentLight → accent（TL_BR，135°），圆角不变。 */
+    private fun accentGradientBg(radiusDp: Int) = GradientDrawable(
+        GradientDrawable.Orientation.TL_BR,
+        UiTokens.accentGradient(pal).map { color(it) }.toIntArray()
+    ).apply { cornerRadius = dp(radiusDp).toFloat() }
+
+    /** v2.2 按压反馈：按下 scale 0.98（100ms），松开 Overshoot 回弹（250ms）；返回 false 不吞 click。 */
+    private fun View.pressBounce() {
+        setOnTouchListener { v, ev ->
+            when (ev.action) {
+                MotionEvent.ACTION_DOWN -> v.animate()
+                    .scaleX(0.98f).scaleY(0.98f).setDuration(UiTokens.DUR_MICRO).start()
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.animate()
+                    .scaleX(1f).scaleY(1f).setDuration(250L)
+                    .setInterpolator(OvershootInterpolator(2f)).start()
+            }
+            false
+        }
     }
 
     private fun round(radius: Int, color: Int, stroke: Boolean = false) = GradientDrawable().apply {

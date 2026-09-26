@@ -2,6 +2,8 @@ package com.jev.probe.overlay
 
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
+import android.animation.ArgbEvaluator
+import android.animation.ValueAnimator
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
@@ -16,11 +18,12 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.animation.AccelerateDecelerateInterpolator
+import android.view.animation.OvershootInterpolator
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.Toast
 import com.jev.probe.core.Analysis
 import com.jev.probe.core.BilingualResult
 import com.jev.probe.core.Prefs
@@ -106,7 +109,7 @@ class OverlayController(private val ctx: Context) {
     private fun card(radius: Int, color: Int, stroke: Boolean = false) = GradientDrawable().apply {
         cornerRadius = dp(radius).toFloat()
         setColor(color)
-        if (stroke) setStroke(dp(1), Color.argb(34, 0, 0, 0))
+        if (stroke) setStroke(dp(1), color(pal.hairline))
     }
 
     // ---------------------------------------------------------------- window
@@ -148,10 +151,8 @@ class OverlayController(private val ctx: Context) {
             gravity = Gravity.CENTER
             textSize = 12f
             setTypeface(typeface, Typeface.BOLD)
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(color(pal.accent))
-            }
+            background = bubbleBg(danger = false)
+            elevation = dp(4).toFloat()
             layoutParams = FrameLayout.LayoutParams(dp(BUBBLE), dp(BUBBLE))
         }
         val dot = View(ctx).apply {
@@ -173,6 +174,7 @@ class OverlayController(private val ctx: Context) {
             visibility = View.GONE
             background = card(UiTokens.RADIUS_PANEL, panelBg(), stroke = true)
             elevation = dp(8).toFloat()
+            clipToOutline = true   // rounded outline follows the GradientDrawable corners
             setPadding(dp(10), dp(6), dp(10), dp(8))
             layoutParams = FrameLayout.LayoutParams(dp(PANEL_W), FrameLayout.LayoutParams.WRAP_CONTENT).apply {
                 topMargin = dp(BUBBLE + 4) // sit just below the bubble
@@ -182,6 +184,7 @@ class OverlayController(private val ctx: Context) {
         val header = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         header.addView(TextView(ctx).apply {
             text = ""; setTextColor(color(pal.faint)); textSize = 11f
+            letterSpacing = 0.02f
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }.also { headerLabel = it })
         header.addView(iconBtn("↻") { onManualAnalyze?.invoke() })
@@ -230,6 +233,7 @@ class OverlayController(private val ctx: Context) {
                 MotionEvent.ACTION_DOWN -> {
                     startX = params.x; startY = params.y; touchX = e.rawX; touchY = e.rawY
                     moved = false; longFired = false; downTime = System.currentTimeMillis()
+                    bubblePress(true)
                     v.postDelayed(longPress, 500); true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -245,21 +249,36 @@ class OverlayController(private val ctx: Context) {
                 }
                 MotionEvent.ACTION_UP -> {
                     v.removeCallbacks(longPress)
+                    bubblePress(false)  // dragged or not, the spring-back always lands
                     if (longFired) { true }
                     else if (moved) {
                         prefs.bubbleX = params.x; prefs.bubbleY = params.y; true  // stays where dropped
                     } else { toggle(); true }
                 }
-                MotionEvent.ACTION_CANCEL -> { v.removeCallbacks(longPress); true }
+                MotionEvent.ACTION_CANCEL -> { v.removeCallbacks(longPress); bubblePress(false); true }
                 else -> false
             }
+        }
+    }
+
+    /** Press juiciness on the bubble itself (not the drag wrap): down shrinks,
+     *  release springs back with a light overshoot. */
+    private fun bubblePress(down: Boolean) {
+        val b = bubble ?: return
+        b.animate().cancel()
+        if (down) {
+            b.animate().scaleX(UiTokens.BUBBLE_PRESS_SCALE).scaleY(UiTokens.BUBBLE_PRESS_SCALE)
+                .setDuration(UiTokens.DUR_MICRO).start()
+        } else {
+            b.animate().scaleX(1f).scaleY(1f).setDuration(250)
+                .setInterpolator(OvershootInterpolator(2.0f)).start()
         }
     }
 
     private fun showBubbleMenu() {
         val menu = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
-            background = card(12, panelBg(), stroke = true)
+            background = card(12, color(pal.surfaceElev), stroke = true)
             elevation = dp(8).toFloat()
             setPadding(dp(4), dp(4), dp(4), dp(4))
             layoutParams = FrameLayout.LayoutParams(dp(196), ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(BUBBLE + 4) }
@@ -335,8 +354,9 @@ class OverlayController(private val ctx: Context) {
                 panelAnimating = true
                 p.visibility = View.VISIBLE
                 p.alpha = 0f
-                p.translationY = dp(8).toFloat()
-                p.animate().alpha(1f).translationY(0f).setDuration(140)
+                p.translationY = dp(12).toFloat()
+                p.animate().alpha(1f).translationY(0f).setDuration(UiTokens.DUR_PANEL)
+                    .setInterpolator(OvershootInterpolator(0.9f))
                     .setListener(object : AnimatorListenerAdapter() {
                         override fun onAnimationEnd(animation: Animator) {
                             p.alpha = 1f; p.translationY = 0f
@@ -352,10 +372,11 @@ class OverlayController(private val ctx: Context) {
             root?.let { runCatching { wm.updateViewLayout(it, params) } }
         } else {
             // Collapse: hide the panel and hand the window position back to the
-            // bubble only after the 140ms fade+slide has finished.
+            // bubble only after the fade+slide has finished.
             if (p != null && p.visibility == View.VISIBLE) {
                 panelAnimating = true
-                p.animate().alpha(0f).translationY(dp(8).toFloat()).setDuration(140)
+                p.animate().alpha(0f).translationY(dp(12).toFloat()).setDuration(UiTokens.DUR_PANEL)
+                    .setInterpolator(AccelerateDecelerateInterpolator())
                     .setListener(object : AnimatorListenerAdapter() {
                         override fun onAnimationEnd(animation: Animator) { finishCollapse(p, params) }
                         override fun onAnimationCancel(animation: Animator) { panelAnimating = false }
@@ -391,15 +412,54 @@ class OverlayController(private val ctx: Context) {
     private var hasResult = false
     private var loading = false
 
+    /** Bubble background: accentLight→accent TL_BR gradient normally, solid danger
+     *  red in the ERROR state. */
+    private fun bubbleBg(danger: Boolean): GradientDrawable =
+        if (danger) {
+            GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(color(pal.danger)) }
+        } else {
+            val g = UiTokens.accentGradient(pal).map { color(it) }.toIntArray()
+            GradientDrawable(GradientDrawable.Orientation.TL_BR, g).apply {
+                shape = GradientDrawable.OVAL
+            }
+        }
+
+    /** Last solid fill color shown on the bubble (gradient end color counts) —
+     *  the crossfade's starting point. */
+    private var bubbleTint: Int? = null
+    private var bubbleFade: ValueAnimator? = null
+
     /** The bubble carries the state, so the panel never has to pop open by itself. */
     private fun setBubble(s: BubbleState) {
         val b = bubble ?: return
         val visual = OverlayRules.bubbleVisual(s)
-        b.text = visual.label
+        b.text = visual.label   // label switches instantly; only the color crossfades
         b.alpha = visual.alpha
-        b.background = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(color(if (visual.danger) pal.danger else pal.accent))
+        val target = color(if (visual.danger) pal.danger else pal.accent)
+        val from = bubbleTint
+        bubbleFade?.cancel()
+        if (from == null || from == target) {
+            b.background = bubbleBg(visual.danger)
+            bubbleTint = target
+            return
+        }
+        // ArgbEvaluator can't interpolate a gradient, so the fade runs on a
+        // solid fill and the gradient comes back when it lands.
+        val bg = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(from) }
+        b.background = bg
+        bubbleFade = ValueAnimator.ofObject(ArgbEvaluator(), from, target).apply {
+            duration = UiTokens.DUR_STATE
+            addUpdateListener {
+                val c = it.animatedValue as Int
+                bg.setColor(c); bubbleTint = c
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    b.background = bubbleBg(visual.danger)
+                    bubbleTint = target
+                }
+            })
+            start()
         }
     }
 
@@ -433,14 +493,24 @@ class OverlayController(private val ctx: Context) {
         setOnClickListener { onClick() }
     }
 
-    /** Loading placeholder: three quiet skeleton cards, no shimmer. */
-    private fun skeletonCards(): List<View> = (1..3).map {
-        View(ctx).apply {
-            background = card(UiTokens.RADIUS_CARD, color(pal.card))
-            alpha = 0.6f
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(44)).apply { topMargin = dp(5) }
+    /** Loading placeholder: three skeleton cards with a staggered alpha shimmer.
+     *  Each card's animator is stashed in its tag; [setContent]/[hide] cancel it. */
+    private fun skeletonCards(): List<View> = (0..2).map { i ->
+        val v = View(ctx)
+        v.background = card(UiTokens.RADIUS_CARD, color(pal.card))
+        v.alpha = 0.35f
+        v.layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(44)).apply { topMargin = dp(5) }
+        val shimmer = ValueAnimator.ofFloat(0.35f, 0.65f).apply {
+            duration = 1200
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
+            startDelay = i * 150L
+            addUpdateListener { v.alpha = it.animatedValue as Float }
+            start()
         }
+        v.tag = shimmer
+        v
     }
 
     /** [open]: legacy Jev mode still opens the panel; bilingual mode only
@@ -478,11 +548,10 @@ class OverlayController(private val ctx: Context) {
         loading = false; hasResult = true  // tapping shows the error instead of retrying blindly
         setBubble(BubbleState.ERROR)
         val ev = OverlayRules.errorView(msg, prefs.effectiveReplyKey().isNotBlank())
+        // 原始错误不进 UI（SPEC A3）；logcat 按隐私规则只打长度，不打内容。
+        android.util.Log.d("JEVASSIST", "overlay: error shown raw.len=${msg.length}")
         val views = ArrayList<View>()
         views.add(line(ev.message, color(pal.danger), 14f, true))
-        // The raw message only gets its own hint line when the human-readable
-        // line does not already carry it.
-        if (ev.message != msg && !ev.message.contains(msg.take(80))) views.add(hint(msg))
         ev.actionLabel?.let { label ->
             views.add(bigButton(label) {
                 when (ev.action) {
@@ -519,6 +588,8 @@ class OverlayController(private val ctx: Context) {
     fun showReplies(ranked: List<RankedReply>, error: String? = null, onFill: (String) -> Unit) {
         lastFill = onFill
         replyError = error
+        // 隐私：失败细节只打长度，不打内容（SPEC A3，原始错误不进 UI）。
+        if (error != null) android.util.Log.d("JEVASSIST", "overlay: replies failed err.len=${error.length}")
         val a = lastJudgment?.copy(rankedReplies = ranked) ?: return
         lastJudgment = a
         render(a, generating = false)
@@ -537,7 +608,8 @@ class OverlayController(private val ctx: Context) {
         val zhOnly = r.lang.isBlank() || r.lang == "中文"
         headerLabel?.text = if (zhOnly) "点一条填入 · 长按复制" else "对方 · ${r.lang}　点一条填入"
         val views = ArrayList<View>()
-        if (r.translation.isNotBlank()) views.add(line(r.translation, color(pal.ink), UiTokens.TEXT_TRANS, true))
+        // 中文对话不显示译文行（与 Windows P0-3 同规则）；lang 缺失时仍按外语处理
+        if (r.translation.isNotBlank() && r.lang != "中文") views.add(line(r.translation, color(pal.ink), UiTokens.TEXT_TRANS, true))
         r.replies.forEachIndexed { i, reply ->
             // 中文对话或释义与正文相同时不显示灰字（与 Windows P0-1 同规则）
             val gloss = if (OverlayRules.shouldShowGloss(r.lang, reply.zh, reply.text)) reply.zh else ""
@@ -552,10 +624,50 @@ class OverlayController(private val ctx: Context) {
         setContent(views)
     }
 
-    fun toast(msg: String) = Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
+    /** In-panel snackbar: a small dark pill at the bottom of the overlay root,
+     *  fading in, holding ~1.6s, then fading out. Replaces itself on repeat calls. */
+    private var snackbar: TextView? = null
+
+    fun snackbar(msg: String) {
+        val r = root ?: return
+        snackbar?.let { old ->
+            old.animate().cancel()
+            old.clearAnimation()
+            r.removeView(old)
+        }
+        val pill = TextView(ctx).apply {
+            text = msg; setTextColor(Color.WHITE); textSize = 12f
+            background = card(20, Color.argb(199, 0, 0, 0)) // 黑 78%
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            alpha = 0f
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                bottomMargin = dp(24)
+            }
+        }
+        snackbar = pill
+        r.addView(pill)
+        pill.animate().alpha(1f).setDuration(120).withEndAction {
+            pill.postDelayed({
+                pill.animate().alpha(0f).setDuration(200).withEndAction {
+                    r.removeView(pill)
+                    if (snackbar === pill) snackbar = null
+                }.start()
+            }, 1600)
+        }.start()
+    }
+
+    /** Every in-file notice routes to the in-panel snackbar (never a system Toast). */
+    fun toast(msg: String) = snackbar(msg)
 
     fun hide() {
         val r = root ?: return
+        cancelContentAnimators()
+        bubbleFade?.cancel(); bubbleFade = null; bubbleTint = null
+        snackbar?.let { it.animate().cancel(); it.clearAnimation(); r.removeView(it) }
+        snackbar = null
         runCatching { wm.removeView(r) }
         root = null; bubble = null; panel = null; contentBox = null; dangerDot = null; expanded = false
         hasResult = false; loading = false; headerLabel = null
@@ -564,8 +676,15 @@ class OverlayController(private val ctx: Context) {
 
     // --------------------------------------------------------------- rendering
 
+    /** Cancel per-child animators (skeleton shimmer) before dropping views. */
+    private fun cancelContentAnimators() {
+        val c = contentBox ?: return
+        for (i in 0 until c.childCount) (c.getChildAt(i).tag as? ValueAnimator)?.cancel()
+    }
+
     private fun setContent(views: List<View>) {
         val c = contentBox ?: return
+        cancelContentAnimators()
         c.removeAllViews(); views.forEach { c.addView(it) }
     }
 
@@ -612,7 +731,9 @@ class OverlayController(private val ctx: Context) {
                 views.add(replyCard(i + 1, r.text, (r.prob * 100).roundToInt(), fill))
             }
             if (a.rankedReplies.isEmpty()) {
-                val msg = replyError?.let { "回复接口出错：$it" } ?: "（未生成候选回复）"
+                // 原始错误不进 UI（SPEC A3）：区分「生成失败」与「没有候选」即可，
+                // 细节由 showReplies 按长度记进 logcat。
+                val msg = if (replyError != null) "回复接口出错了，点下方重新分析" else "（未生成候选回复）"
                 views.add(hint(msg))
             }
         }
@@ -661,6 +782,23 @@ class OverlayController(private val ctx: Context) {
                 if (expanded) toggle()
             }
             setOnLongClickListener { copy(text); true }
+            // Press juiciness: shrink + darken on down, release back on up/cancel.
+            // Returns false so click / long-click still fire.
+            val pressedBg = if (top) mix(cardBg, color(pal.accentDeep), 0.08f) else darken(cardBg)
+            setOnTouchListener { _, e ->
+                when (e.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        animate().scaleX(UiTokens.PRESS_SCALE).scaleY(UiTokens.PRESS_SCALE)
+                            .setDuration(UiTokens.DUR_MICRO).start()
+                        background = card(UiTokens.RADIUS_CARD, pressedBg)
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        animate().scaleX(1f).scaleY(1f).setDuration(UiTokens.DUR_MICRO).start()
+                        background = card(UiTokens.RADIUS_CARD, cardBg)
+                    }
+                }
+                false
+            }
         }
         if (pct >= 0) c.addView(TextView(ctx).apply {
             this.text = "#$rank · ${pct}%"
@@ -669,7 +807,7 @@ class OverlayController(private val ctx: Context) {
         })
         c.addView(TextView(ctx).apply {
             this.text = text; setTextColor(color(pal.ink)); textSize = UiTokens.TEXT_BODY
-            setLineSpacing(dp(1).toFloat(), 1f)
+            setLineSpacing(dp(1).toFloat(), 1.3f)
         })
         if (zh.isNotBlank()) c.addView(TextView(ctx).apply {
             this.text = zh; setTextColor(color(pal.sub)); textSize = UiTokens.TEXT_AUX
@@ -716,7 +854,7 @@ class OverlayController(private val ctx: Context) {
     private fun hint(text: String) = line(text, color(pal.faint), 12f)
 
     private fun divider() = View(ctx).apply {
-        setBackgroundColor(Color.argb(31, 0, 0, 0))
+        setBackgroundColor(color(pal.hairline))
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)).apply {
             topMargin = dp(8); bottomMargin = dp(4)
         }
@@ -733,6 +871,20 @@ class OverlayController(private val ctx: Context) {
         lvl >= 3 -> color(pal.warn)
         else -> color(pal.ok)
     }
+
+    /** Blend color [a] toward [b] by fraction [t] (0 = a, 1 = b). */
+    private fun mix(a: Int, b: Int, t: Float): Int = Color.argb(
+        (Color.alpha(a) + (Color.alpha(b) - Color.alpha(a)) * t).roundToInt(),
+        (Color.red(a) + (Color.red(b) - Color.red(a)) * t).roundToInt(),
+        (Color.green(a) + (Color.green(b) - Color.green(a)) * t).roundToInt(),
+        (Color.blue(a) + (Color.blue(b) - Color.blue(a)) * t).roundToInt())
+
+    /** Darken a color ~8% by scaling its RGB channels (alpha preserved). */
+    private fun darken(c: Int, f: Float = 0.92f): Int = Color.argb(
+        Color.alpha(c),
+        (Color.red(c) * f).roundToInt(),
+        (Color.green(c) * f).roundToInt(),
+        (Color.blue(c) * f).roundToInt())
 
     private fun dangerWord(lvl: Int): String = when {
         lvl >= 8 -> "很危险"

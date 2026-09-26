@@ -110,7 +110,8 @@ object OverlayRules {
     // !hasReplyKey → ("还没填回复接口的 key", OPEN_SETTINGS, "去设置")
     // raw 含 401/403/key/密钥（忽略大小写）→ ("回复接口的 key 不对或已过期", OPEN_SETTINGS, "去设置")
     // raw 含 timeout/超时/Unable to resolve/网络（忽略大小写）→ ("网络连不上，稍后再试", RETRY, "重试")
-    // 其他 → ("出错了：${raw.take(80)}", RETRY, "重试")
+    // 其他 → ("出错了，稍后再试", RETRY, "重试")
+    // SPEC-ui-polish A3：原始错误信息不进 UI（logcat 只打长度/条数），fallback 不含 raw。
 
     /** 设置页「高级」折叠：智能回复开 → 默认折叠（P1-6）。 */
     fun foldAdvancedByDefault(bilingualMode: Boolean): Boolean = bilingualMode
@@ -142,7 +143,7 @@ object OverlayRules {
    - OPEN_SETTINGS → 按钮文案「去设置」，点击 `openSettings()`；
    - RETRY → 「重试」，点击 `onManualAnalyze?.invoke()`；
    按钮用 `bigButton` 样式（accent 底白字）。
-5. **展开/收起动效**（P2-6）：140ms，alpha 0→1 + translationY dp(8)→0（收起反向），
+5. **展开/收起动效**（P2-6）：140ms，alpha 0→1 + translationY dp(12)→0（收起反向），
    `AccelerateDecelerateInterpolator` 或不加 interpolator 的线性均可；不要弹簧。
    收起时动画结束再 `visibility = GONE` 并复位窗口位置；动画期间重复点气泡要幂等
    （再次 toggle 直接完成最终态）。窗口 flags 不动（`FLAG_NOT_FOCUSABLE` 保持）。
@@ -162,8 +163,8 @@ object OverlayRules {
 3. **「高级」折叠**：容器默认状态 = `OverlayRules.foldAdvancedByDefault(prefs.bilingualMode)`
    （开=折叠）；折叠条一行：「高级：判断接口 · 识图接口」+ 右侧「展开/收起」；
    「智能回复」开关被切换时同步折叠/展开（开→折叠，关→展开），仅影响显示，不改 prefs。
-4. **「关于我」上第一屏**：从分析卡底部移到分析卡最上方第一个字段（HANDOFF：放到第一屏；
-   分析卡本身保持在「分析」区首位）。
+4. **「关于我」上第一屏**：独立成卡，置于标题「设置」之后、「接口」区之前，是设置页
+   第一张业务卡（SPEC-ui-polish A5）；「分析」卡从关系描述开始，保存逻辑不变。
 5. 不改：所有保存逻辑、provider 解析/URL 展开逻辑、测试按钮逻辑、pasteBtn、
    自检入口、隐私/开源链接。只是视觉与排布。
 
@@ -185,3 +186,59 @@ object OverlayRules {
 
 B、C 文件不相交，A 完成后并行。任何子任务都不得改动 `ChatCaptureService.kt`、
 `ReplyClient.kt`、`Prefs.kt`、`ChatMemory.kt`（工作区未装机改动，非本轮范围）。
+
+---
+
+# 第二轮：设计系统 v2（企业级 · 艺术配色 · juiciness）
+
+> 用户指示：在第一轮达标的基础上，以大师级 UI/UX、专业平面设计思路继续打磨。
+> 硬规则不变：只填不发、面板不自动弹出、FLAG_NOT_FOCUSABLE、日志不记内容。
+
+## v2.1 色彩（新增 token）
+
+| token | 浅色 | 深色 | 用途 |
+|---|---|---|---|
+| `accentDeep` | `#3F4BC0` | `#5A64DC` | 渐变末端、按压态 |
+| `accentLight` | `#8B94EC` | `#9AA3F2` | 高光、次要强调 |
+| `accentSoft` | `#E8EAFC`（调整） | `#2B2F4A`（调整） | 推荐卡底 |
+| `surfaceElev` | `#FFFFFF` | `#232840` | 菜单、气泡菜单等抬升面 |
+| `canvas` | `#F4F5F9`（调整） | `#0F1220`（调整） | 页面底色 |
+| `hairline` | 黑 8% | 白 10% | 发丝分割线（运行时 alpha 值） |
+
+气泡/主按钮渐变：`accentLight → accent` 135°（GradientDrawable.Orientation.TL_BR）。
+骨架屏微光：底色 `card` 上叠加 `accentSoft` 的 alpha 呼吸（0.35↔0.65，1200ms，三张卡相位错开 150ms）。
+
+## v2.2 动效（juiciness，克制）
+
+| 交互 | 参数 |
+|---|---|
+| 气泡按下 | scale → 0.88，松开 OvershootInterpolator(tension=2.0) 回 1 |
+| 回复卡按下 | scale → 0.97 + 背景加深，100ms；松开回弹 |
+| 面板展开/收起 | 160ms（原 140ms 放宽），展开带 tension≈0.9 的极轻 overshoot |
+| 气泡状态切换 | 背景色 200ms crossfade（ArgbEvaluator），文案同步切换 |
+| toast | 改面板内胶囊 snackbar：黑 78% 底白字 12sp，底部居中，1.6s 淡出 |
+
+新增 `UiTokens` 常量：`DUR_MICRO=100L`、`DUR_PANEL=160L`、`DUR_STATE=200L`、
+`PRESS_SCALE=0.97f`、`BUBBLE_PRESS_SCALE=0.88f`。
+
+## v2.3 平面设计规范
+
+- 全部间距落在 4 的倍数（8pt 网格：4/8/12/16/20/24）。
+- 面板圆角升 18（`RADIUS_PANEL` 调整），`clipToOutline` + elevation 8 柔和投影。
+- 卡片描边统一为 hairline（替代原 `#22000000` 半透明黑，深色下换白 10%）。
+- 回复正文行距 1.3 倍；头部小字 letterSpacing 0.02。
+- 设置页：section 标题 12sp + letterSpacing 0.08 大写感（中文等效加宽字距）；卡片 elevation 2。
+
+## v2.4 分工
+
+- 我：UiTokens/OverlayRules 扩展 + 单测（TDD）
+- 子任务 B2：`OverlayController.kt`（气泡渐变+投影+弹性、状态 crossfade、卡片按压反馈、骨架 shimmer、snackbar、面板 18 圆角投影）
+- 子任务 C2：`SettingsActivity.kt` + `MainActivity.kt` + `KnowledgeActivity.kt`（section 排版、卡片投影、divider 发丝化、间距 8pt 网格校正、深色核验）
+
+验收：构建 + 单测全绿；hex 仍只在 UiTokens.kt；真机截图四态 + 深色模式一组。
+
+## v2.5 补充决策（review 采纳）
+
+- **错误兜底文案不带原始错误信息**：原始错误只进 logcat（且只打长度，不打内容）。
+  理由：接口返回的错误串可能夹带请求细节，UI 只显示人话 + 动作。§2.2 的兜底分支
+  以本条目为准（`errorView` 与 `showError` 已实现一致）。

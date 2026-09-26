@@ -17,13 +17,19 @@ class UiTokensTest {
             "canvas" to p.canvas,
             "card" to p.card,
             "accent" to p.accent,
+            "accentDeep" to p.accentDeep,
+            "accentLight" to p.accentLight,
             "accentSoft" to p.accentSoft,
+            "surfaceElev" to p.surfaceElev,
             "danger" to p.danger,
             "warn" to p.warn,
             "ok" to p.ok,
         ).forEach { (name, value) ->
             assertTrue("LIGHT/DARK palette field '$name' is not a valid #RRGGBB: $value", hexColor.matches(value))
         }
+        assertTrue(
+            "hairline must be #AARRGGBB: ${p.hairline}",
+            Regex("^#[0-9A-Fa-f]{8}$").matches(p.hairline))
     }
 
     @Test

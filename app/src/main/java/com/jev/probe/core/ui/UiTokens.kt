@@ -11,7 +11,9 @@ object UiTokens {
     data class Palette(
         val ink: String, val sub: String, val faint: String,
         val surface: String, val canvas: String, val card: String,
-        val accent: String, val accentSoft: String,
+        val accent: String, val accentDeep: String, val accentLight: String,
+        val accentSoft: String, val surfaceElev: String,
+        val hairline: String,   // "#AARRGGBB"，发丝分割线
         val danger: String, val warn: String, val ok: String,
     )
 
@@ -20,24 +22,32 @@ object UiTokens {
         sub = "#6B7280",
         faint = "#9CA3AF",
         surface = "#FFFFFF",
-        canvas = "#F5F6F8",
+        canvas = "#F4F5F9",
         card = "#F3F4F6",
         accent = "#4F5BD5",
-        accentSoft = "#E4E6FA",
+        accentDeep = "#3F4BC0",
+        accentLight = "#8B94EC",
+        accentSoft = "#E8EAFC",
+        surfaceElev = "#FFFFFF",
+        hairline = "#14000000",
         danger = "#DC2626",
         warn = "#D97706",
-        ok = "#16A34A",
+        ok = "#0E9F6E",
     )
 
     val DARK: Palette = Palette(
         ink = "#E5E7EB",
         sub = "#9CA3AF",
         faint = "#6B7280",
-        surface = "#1F2937",
-        canvas = "#111827",
-        card = "#374151",
+        surface = "#1A1E30",
+        canvas = "#0F1220",
+        card = "#262B45",
         accent = "#6B76E8",
-        accentSoft = "#33374F",
+        accentDeep = "#5A64DC",
+        accentLight = "#9AA3F2",
+        accentSoft = "#2B2F4A",
+        surfaceElev = "#232840",
+        hairline = "#1AFFFFFF",
         danger = "#EF4444",
         warn = "#FBBF24",
         ok = "#34D399",
@@ -53,7 +63,17 @@ object UiTokens {
 
     // §1.3 圆角（dp）
     const val RADIUS_CARD = 10
-    const val RADIUS_PANEL = 14
+    const val RADIUS_PANEL = 18
+
+    // v2.2 动效（ms / 比例）
+    const val DUR_MICRO = 100L
+    const val DUR_PANEL = 160L
+    const val DUR_STATE = 200L
+    const val PRESS_SCALE = 0.97f
+    const val BUBBLE_PRESS_SCALE = 0.88f
+
+    /** 气泡/主按钮渐变：accentLight → accent，135°（TL_BR）。 */
+    fun accentGradient(p: Palette): Array<String> = arrayOf(p.accentLight, p.accent)
 }
 
 /**

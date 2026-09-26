@@ -47,7 +47,8 @@ object OverlayRules {
         ) {
             return ErrorView("网络连不上，稍后再试", ErrorAction.RETRY, "重试")
         }
-        return ErrorView("出错了：${raw.take(80)}", ErrorAction.RETRY, "重试")
+        // SPEC A3：原始错误信息不进 UI（可进 logcat，只打长度/条数）。
+        return ErrorView("出错了，稍后再试", ErrorAction.RETRY, "重试")
     }
 
     /** 设置页「高级」折叠：智能回复开 → 默认折叠（P1-6）。 */

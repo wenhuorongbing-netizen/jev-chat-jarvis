@@ -8,8 +8,10 @@ import android.os.Bundle
 import android.text.InputType
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.animation.OvershootInterpolator
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -63,7 +65,7 @@ class KnowledgeActivity : AppCompatActivity() {
         val scroll = ScrollView(this)
         container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(22), dp(18), dp(28))
+            setPadding(dp(20), dp(24), dp(20), dp(28))
         }
         container.padForSystemBars()   // edge-to-edge: keep the title off the status bar
         scroll.addView(container)
@@ -77,7 +79,7 @@ class KnowledgeActivity : AppCompatActivity() {
         container.removeAllViews()
         container.addView(text("知识库与联系人", 24f, ink, bold = true))
         container.addView(text("只存在本机，不上传。分析时按会话标题匹配联系人、按关键词命中笔记。",
-            12f, sub).apply { setPadding(0, dp(6), 0, dp(4)) })
+            12f, sub).apply { setPadding(0, dp(8), 0, dp(4)) })
         container.addView(tabs())
         if (tab == 0) renderNotes() else renderContacts()
     }
@@ -92,13 +94,13 @@ class KnowledgeActivity : AppCompatActivity() {
         listOf("笔记", "联系人").forEachIndexed { i, name ->
             val pill = TextView(this).apply {
                 text = name; textSize = 13f; gravity = Gravity.CENTER
-                setPadding(dp(18), dp(8), dp(18), dp(8))
+                setPadding(dp(20), dp(8), dp(20), dp(8))
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = dp(8) }
                 setTextColor(if (i == tab) Color.WHITE else sub)
                 setTypeface(typeface, if (i == tab) Typeface.BOLD else Typeface.NORMAL)
-                background = round(dp(9), if (i == tab) accent else pillOff)
+                background = if (i == tab) accentGradientBg(9) else round(dp(9), pillOff)
                 setOnClickListener { tab = i; render() }
             }
             row.addView(pill)
@@ -118,7 +120,7 @@ class KnowledgeActivity : AppCompatActivity() {
         }
         notes.forEach { container.addView(noteRow(it)) }
         container.addView(text("点条目编辑，长按删除。命中规则：任一标签或标题出现在会话标题或最近 6 条消息里。",
-            11f, sub).apply { setPadding(dp(2), dp(12), 0, 0) })
+            11f, sub).apply { setPadding(dp(4), dp(12), 0, 0) })
     }
 
     private fun noteRow(n: Note): View {
@@ -134,9 +136,9 @@ class KnowledgeActivity : AppCompatActivity() {
         left.addView(text(head, 15f, ink, bold = true))
         left.addView(text(
             if (n.tags.isEmpty()) "无标签" else "标签：" + n.tags.joinToString("、"),
-            12f, sub).apply { setPadding(0, dp(3), 0, 0) })
+            12f, sub).apply { setPadding(0, dp(4), 0, 0) })
         left.addView(text(n.content.replace("\n", " ").take(46), 12f, sub)
-            .apply { setPadding(0, dp(3), 0, 0) })
+            .apply { setPadding(0, dp(4), 0, 0) })
         row.addView(left)
         row.addView(smallToggle(n.enabled) {
             store.saveNote(n.copy(enabled = !n.enabled)); render()
@@ -237,7 +239,7 @@ class KnowledgeActivity : AppCompatActivity() {
         }
         contacts.forEach { container.addView(contactRow(it)) }
         container.addView(text("点条目编辑，长按删除。会话标题等于名字或任一别名即算命中（忽略大小写与群人数后缀）。",
-            11f, sub).apply { setPadding(dp(2), dp(12), 0, 0) })
+            11f, sub).apply { setPadding(dp(4), dp(12), 0, 0) })
     }
 
     private fun contactRow(c0: Contact): View {
@@ -245,22 +247,22 @@ class KnowledgeActivity : AppCompatActivity() {
         c.addView(text(c0.name.ifBlank { "（无名）" }, 15f, ink, bold = true))
         if (c0.aliases.isNotEmpty())
             c.addView(text("别名：" + c0.aliases.joinToString("、"), 12f, sub)
-                .apply { setPadding(0, dp(3), 0, 0) })
+                .apply { setPadding(0, dp(4), 0, 0) })
         if (c0.apps.isNotEmpty())
             c.addView(text("来源：" + c0.apps.joinToString("、") { appLabel(it) }, 12f, sub)
-                .apply { setPadding(0, dp(3), 0, 0) })
+                .apply { setPadding(0, dp(4), 0, 0) })
         if (c0.relationship.isNotBlank())
             c.addView(text("关系：" + c0.relationship.replace("\n", " ").take(40), 12f, sub)
-                .apply { setPadding(0, dp(3), 0, 0) })
+                .apply { setPadding(0, dp(4), 0, 0) })
         if (c0.notes.isNotBlank())
             c.addView(text("备注：" + c0.notes.replace("\n", " ").take(40), 12f, sub)
-                .apply { setPadding(0, dp(3), 0, 0) })
+                .apply { setPadding(0, dp(4), 0, 0) })
 
         val logN = store.logSize(c0.id)
         val clear = TextView(this).apply {
             text = "清空此人历史（$logN 条）"
             textSize = 12.5f; setTextColor(red); setTypeface(typeface, Typeface.BOLD)
-            setPadding(0, dp(10), 0, dp(2))
+            setPadding(0, dp(12), 0, dp(4))
             setOnClickListener {
                 if (logN == 0) { toast("本来就没有历史"); return@setOnClickListener }
                 confirm("清空历史", "删掉「${c0.name}」的 $logN 条聊天历史？联系人档案保留。") {
@@ -363,10 +365,12 @@ class KnowledgeActivity : AppCompatActivity() {
         text = labelText; textSize = 14f; gravity = Gravity.CENTER
         setTypeface(typeface, Typeface.BOLD)
         setTextColor(if (primary) Color.WHITE else accent)
-        background = round(dp(11), if (primary) accent else surface, stroke = !primary)
-        setPadding(dp(12), dp(11), dp(12), dp(11))
+        // v2.1：主按钮改渐变；次按钮保持 surface 底 + accent 语义描边。
+        background = if (primary) accentGradientBg(11) else round(dp(11), surface, stroke = true)
+        setPadding(dp(12), dp(12), dp(12), dp(12))
         layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             .apply { rightMargin = dp(8) }
+        if (primary) pressBounce()
         setOnClickListener { onClick() }
     }
 
@@ -374,15 +378,16 @@ class KnowledgeActivity : AppCompatActivity() {
         text = if (on) "开" else "关"; textSize = 13f; gravity = Gravity.CENTER
         setTypeface(typeface, Typeface.BOLD)
         setTextColor(if (on) Color.WHITE else sub)
-        background = round(dp(10), if (on) accent else pillOff)
-        setPadding(dp(16), dp(6), dp(16), dp(6))
+        // v2 施工 6：toggle 选中态换渐变，未选中保持 pal.card。
+        background = if (on) accentGradientBg(10) else round(dp(10), pillOff)
+        setPadding(dp(16), dp(8), dp(16), dp(8))
         setOnClickListener { onClick() }
     }
 
     private fun toggleRow(labelText: String, initial: Boolean): LinearLayout {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(12), 0, dp(2)); tag = initial
+            setPadding(0, dp(12), 0, dp(4)); tag = initial
         }
         val lab = text(labelText, 14f, ink).apply {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
@@ -391,14 +396,15 @@ class KnowledgeActivity : AppCompatActivity() {
             text = if (initial) "开" else "关"; textSize = 13f; gravity = Gravity.CENTER
             setTypeface(typeface, Typeface.BOLD)
             setTextColor(if (initial) Color.WHITE else sub)
-            background = round(dp(10), if (initial) accent else pillOff)
-            setPadding(dp(18), dp(6), dp(18), dp(6))
+            // v2 施工 6：toggle 选中态换渐变，未选中保持 pal.card。
+            background = if (initial) accentGradientBg(10) else round(dp(10), pillOff)
+            setPadding(dp(20), dp(8), dp(20), dp(8))
         }
         sw.setOnClickListener {
             val now = !((row.tag as? Boolean) ?: true); row.tag = now
             sw.text = if (now) "开" else "关"
             sw.setTextColor(if (now) Color.WHITE else sub)
-            sw.background = round(dp(10), if (now) accent else pillOff)
+            sw.background = if (now) accentGradientBg(10) else round(dp(10), pillOff)
         }
         row.addView(lab); row.addView(sw)
         return row
@@ -409,10 +415,12 @@ class KnowledgeActivity : AppCompatActivity() {
     private fun card() = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         background = round(dp(14), surface)
-        setPadding(dp(14), dp(12), dp(14), dp(12))
+        elevation = dp(2).toFloat()   // v2.3：卡片柔和投影
+        clipToOutline = true
+        setPadding(dp(16), dp(12), dp(16), dp(12))
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            .apply { topMargin = dp(10) }
+            .apply { topMargin = dp(12) }
     }
 
     private fun label(t: String) = text(t, 13f, ink, bold = true).apply { setPadding(0, dp(12), 0, dp(4)) }
@@ -421,15 +429,35 @@ class KnowledgeActivity : AppCompatActivity() {
         setText(value); hint = hintText; textSize = 14f; setTextColor(ink)
         setHintTextColor(color(pal.faint))
         background = round(dp(8), pillOff)
-        setPadding(dp(10), dp(10), dp(10), dp(10))
+        setPadding(dp(12), dp(12), dp(12), dp(12))
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            .apply { topMargin = dp(2) }
+            .apply { topMargin = dp(4) }
     }
 
     private fun text(t: String, size: Float, color: Int, bold: Boolean = false) = TextView(this).apply {
         text = t; textSize = size; setTextColor(color)
         if (bold) setTypeface(typeface, Typeface.BOLD)
+    }
+
+    /** v2.1 主按钮渐变：accentLight → accent（TL_BR，135°），圆角不变。 */
+    private fun accentGradientBg(radiusDp: Int) = GradientDrawable(
+        GradientDrawable.Orientation.TL_BR,
+        UiTokens.accentGradient(pal).map { color(it) }.toIntArray()
+    ).apply { cornerRadius = dp(radiusDp).toFloat() }
+
+    /** v2.2 按压反馈：按下 scale 0.98（100ms），松开 Overshoot 回弹（250ms）；返回 false 不吞 click。 */
+    private fun View.pressBounce() {
+        setOnTouchListener { v, ev ->
+            when (ev.action) {
+                MotionEvent.ACTION_DOWN -> v.animate()
+                    .scaleX(0.98f).scaleY(0.98f).setDuration(UiTokens.DUR_MICRO).start()
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.animate()
+                    .scaleX(1f).scaleY(1f).setDuration(250L)
+                    .setInterpolator(OvershootInterpolator(2f)).start()
+            }
+            false
+        }
     }
 
     private fun round(radius: Int, color: Int, stroke: Boolean = false) = GradientDrawable().apply {
