@@ -4,13 +4,18 @@ import android.content.Context
 import android.util.Log
 
 /**
- * App-private config store. Holds the three API routes (judge / reply / vision),
- * the relationship description used in Jev's state, the conversation whitelist,
- * plus the context (D stage) and OCR (B stage) switches.
+ * App-private config store. Holds the two live API routes (reply / vision),
+ * the relationship description, the conversation whitelist, plus the context
+ * and OCR switches.
+ *
+ * Sprint 5 (D1): the Jev judgment mode is deleted. The judge route's fields
+ * survive only as @Deprecated read/write shims over the old storage keys, so
+ * an upgraded install with v1.x data cannot crash and an old judge key can
+ * still serve as the reply-route fallback (see [effectiveReplyKey]).
  *
  * Key handling: stored in app-private SharedPreferences (not world-readable,
  * never logged, never in code/git). Only key *lengths* are ever logged.
- * The three API keys are additionally encrypted at rest via [KeyVault]
+ * The API keys are additionally encrypted at rest via [KeyVault]
  * (Android Keystore AES/GCM, `v1:` format) — the public getters/setters
  * below still speak plaintext; the disk only ever sees ciphertext.
  */
@@ -71,14 +76,16 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         e.apply()
     }
 
-    // ---------------------------------------------------------------- judge
+    // ------------------------------------------------ judge (deprecated, legacy data only)
 
-    /** "bocha" | "openrouter" | "typesafe" | "vercel" | "zen" | "custom". */
+    /** @deprecated Jev 判断模式已删（Sprint 5 / D1）。仅为兼容老数据保留读写。 */
+    @Deprecated("Jev judge mode deleted in Sprint 5; kept only so old stored data stays readable")
     var judgeProvider: String
         get() = sp.getString(K_JUDGE_PROVIDER, PROVIDER_OPENROUTER) ?: PROVIDER_OPENROUTER
         set(v) = sp.edit().putString(K_JUDGE_PROVIDER, v.trim()).apply()
 
-    /** Host root; the path is appended per provider (see [judgeEndpoint]). */
+    /** @deprecated Jev 判断模式已删（Sprint 5 / D1）。仅为兼容老数据保留读写。 */
+    @Deprecated("Jev judge mode deleted in Sprint 5; kept only so old stored data stays readable")
     var judgeBaseUrl: String
         get() = sp.getString(K_JUDGE_BASE, DEFAULT_JUDGE_BASE_OPENROUTER) ?: DEFAULT_JUDGE_BASE_OPENROUTER
         set(v) = sp.edit().putString(K_JUDGE_BASE, v.trim()).apply()
@@ -86,16 +93,23 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
     /**
      * Plaintext in / plaintext out — encryption is a storage detail, see
      * [readSecret]/[writeSecret]. Disk holds `v1:` AES/GCM ciphertext.
+     *
+     * @deprecated Jev 判断模式已删（Sprint 5 / D1）。仍被 [effectiveReplyKey]
+     * 用作老数据的兜底 key，读写保留。
      */
+    @Deprecated("Jev judge mode deleted in Sprint 5; kept as the legacy fallback for effectiveReplyKey")
     var judgeKey: String
         get() = readSecret(K_JUDGE_KEY)
         set(v) = writeSecret(K_JUDGE_KEY, v)
 
+    /** @deprecated Jev 判断模式已删（Sprint 5 / D1）。仅为兼容老数据保留读写。 */
+    @Deprecated("Jev judge mode deleted in Sprint 5; kept only so old stored data stays readable")
     var judgeModel: String
         get() = sp.getString(K_JUDGE_MODEL, DEFAULT_JUDGE_MODEL_OPENROUTER) ?: DEFAULT_JUDGE_MODEL_OPENROUTER
         set(v) = sp.edit().putString(K_JUDGE_MODEL, v.trim()).apply()
 
-    /** Back-compat alias so older call sites keep compiling. */
+    /** @deprecated Back-compat alias so older call sites keep compiling. */
+    @Deprecated("Alias of the deprecated judgeKey; kept for source compatibility only")
     var openRouterKey: String
         get() = judgeKey
         set(v) { judgeKey = v }
@@ -182,7 +196,7 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
 
     // ------------------------------------------------------------- existing
 
-    /** Free-text describing who the other person is; goes into Jev's state. */
+    /** Free-text describing who the other person is; injected into the reply prompt. */
     var relationship: String
         get() = sp.getString(K_REL, DEFAULT_REL) ?: DEFAULT_REL
         set(v) = sp.edit().putString(K_REL, v).apply()
@@ -221,13 +235,15 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         set(v) = sp.edit().putBoolean(K_AUTO, v).apply()
 
     /**
-     * Bilingual mode: skip Jev entirely; the reply route alone translates the
-     * other side into Chinese and drafts 3 replies in [bilingualLang] with
-     * Chinese glosses. Only the reply key is needed.
+     * Sprint 5 (D1): bilingual is the only mode — the Jev judgment mode and its
+     * settings toggle are deleted. The getter is pinned to true so an old
+     * install that once switched it off still behaves the bilingual way; the
+     * setter ignores writes (the K_BILINGUAL storage key is inert legacy data).
+     * Only the reply key is needed.
      */
     var bilingualMode: Boolean
-        get() = sp.getBoolean(K_BILINGUAL, true)  // 默认开：只要回复接口一把 key，不用 Jev
-        set(v) = sp.edit().putBoolean(K_BILINGUAL, v).apply()
+        get() = true   // 永远 true：模式开关已废弃（Sprint 5 / D1）
+        set(@Suppress("UNUSED_PARAMETER") v) = Unit   // 写入忽略：老版本残留值不再生效
 
     /** Language the replies are written in (and filled), e.g. "德语". */
     var bilingualLang: String
@@ -282,24 +298,12 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         sp.edit().putString(storageKey, stored).apply()
     }
 
-    /** Reply route key, falling back to the judge key. */
+    /** Reply route key, falling back to the legacy judge key (old installs). */
+    @Suppress("DEPRECATION")
     fun effectiveReplyKey(): String = replyKey.ifBlank { judgeKey }
 
-    /** Vision route key, falling back to reply then judge. */
+    /** Vision route key, falling back to reply then the legacy judge key. */
     fun effectiveVisionKey(): String = visionKey.ifBlank { effectiveReplyKey() }
-
-    /** Full POST URL for the Jev decisions call, per provider. */
-    fun judgeEndpoint(): String {
-        val base = judgeBaseUrl.trim().trimEnd('/')
-        return when (judgeProvider) {
-            PROVIDER_BOCHA -> "$base/v1/systemone"    // same path as TypeSafe
-            PROVIDER_TYPESAFE -> "$base/v1/systemone"
-            PROVIDER_VERCEL -> "$base/v1/systemone"   // TypeSafe-compatible gateway
-            PROVIDER_ZEN -> "$base/v1/systemone"      // TypeSafe-compatible gateway
-            PROVIDER_CUSTOM -> judgeBaseUrl.trim()   // user supplies the full URL
-            else -> "$base/alpha/decisions"
-        }
-    }
 
     /** Full POST URL for the OpenAI-compatible chat completions call. */
     fun replyEndpoint(): String = "${replyBaseUrl.trim().trimEnd('/')}/chat/completions"
@@ -317,8 +321,9 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         return wl.any { title.contains(it) }
     }
 
-    /** Readiness gate: the judge route is the one that must be configured. */
-    fun hasKey(): Boolean = judgeKey.isNotBlank()
+    /** Readiness gate: the reply route is the one that must be configured
+     *  (bilingual is the only mode since Sprint 5 / D1). */
+    fun hasKey(): Boolean = hasReplyKey()
 
     /** Bilingual mode only needs the reply route. */
     fun hasReplyKey(): Boolean = effectiveReplyKey().isNotBlank()
@@ -362,33 +367,16 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         private const val K_BILINGUAL_LANG = "bilingual_lang"
         const val DEFAULT_BILINGUAL_LANG = "德语"
 
-        const val PROVIDER_BOCHA = "bocha"
-        const val PROVIDER_OPENROUTER = "openrouter"
-        const val PROVIDER_TYPESAFE = "typesafe"
-        const val PROVIDER_VERCEL = "vercel"
-        const val PROVIDER_ZEN = "zen"
-        const val PROVIDER_CUSTOM = "custom"
+        const val PROVIDER_BOCHA = "bocha"          // legacy: only read by the v1.4.0 unseed migration
+        const val PROVIDER_OPENROUTER = "openrouter" // legacy default of the deprecated judge route
 
         const val OCR_MLKIT = "mlkit"
         const val OCR_VISION = "vision"
 
-        // Judge route presets.
-        // Bocha Jev: same protocol/path as TypeSafe (/v1/systemone). Limited-time free.
-        const val DEFAULT_JUDGE_BASE_BOCHA = "https://jev.bocha.cn"
-        const val DEFAULT_JUDGE_MODEL_BOCHA = "bocha-jev-v1"
+        // Legacy judge-route defaults: only referenced by the deprecated judge
+        // getters above, so old stored data keeps decoding the same way.
         const val DEFAULT_JUDGE_BASE_OPENROUTER = "https://openrouter.ai/api"
         const val DEFAULT_JUDGE_MODEL_OPENROUTER = "typesafe/jev-1.13"
-        const val DEFAULT_JUDGE_BASE_TYPESAFE = "https://api.typesafe.ai"
-        const val DEFAULT_JUDGE_MODEL_TYPESAFE = "jev-latest"
-        // Vercel AI Gateway's TypeSafe-compatible API. Same /v1/systemone body
-        // and noul answers as TypeSafe direct; model id is the gateway's.
-        const val DEFAULT_JUDGE_BASE_VERCEL = "https://ai-gateway.vercel.sh/typesafe"
-        const val DEFAULT_JUDGE_MODEL_VERCEL = "typesafe-ai/jev"
-        // OpenCode Zen's TypeSafe-compatible API. Same /v1/systemone body and
-        // noul answers; jev-1.13 is free on output ($0.042/M input, ~1k tokens
-        // per judgment), jev-1.13-free is fully free but capability-limited.
-        const val DEFAULT_JUDGE_BASE_ZEN = "https://opencode.ai/zen"
-        const val DEFAULT_JUDGE_MODEL_ZEN = "jev-1.13"
 
         // Reply route presets (OpenAI-compatible chat completions).
         const val DEFAULT_REPLY_BASE = "https://openrouter.ai/api/v1"

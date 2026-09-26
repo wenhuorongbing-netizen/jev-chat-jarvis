@@ -25,15 +25,11 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.doAfterTextChanged
-import com.jev.probe.core.ChatSnapshot
-import com.jev.probe.core.Msg
 import com.jev.probe.core.Prefs
 import com.jev.probe.core.kb.KbSelfCheck
 import com.jev.probe.core.kb.KbStore
-import com.jev.probe.core.ui.OverlayRules
 import com.jev.probe.core.ui.UiTokens
 import com.jev.probe.core.ui.color
-import com.jev.probe.jev.JudgeClient
 import com.jev.probe.jev.ReplyClient
 import com.jev.probe.jev.VisionClient
 import java.util.concurrent.Executors
@@ -55,9 +51,6 @@ class SettingsActivity : AppCompatActivity() {
     private val ink by lazy { color(pal.ink) }
     private val sub by lazy { color(pal.sub) }
     private val pillOff by lazy { color(pal.card) }
-
-    /** Selected provider index for the judge card; reads resolve against the typed URL. */
-    private var judgeProviderIdx = 0
 
     private fun dp(v: Int) = TypedValue.applyDimension(
         TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).roundToInt()
@@ -95,162 +88,9 @@ class SettingsActivity : AppCompatActivity() {
         // =================== 接口 ===================
         root.addView(section("接口"))
 
-        // §4-2/4-3：回复接口卡排第一；判断卡、识图卡、上下文装进「高级」折叠容器。
-        // 容器先建好，各卡的构建代码原样保留，只是 addView 目标换成它。
+        // §4-2/4-3：回复接口卡排第一；识图卡、上下文装进「高级」折叠容器（Sprint 5 删掉判断卡后，
+        // 高级区默认折叠写死为 true）。
         val advancedBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-
-        // --- 判断接口（旧模式） ---
-        val judgeCard = card()
-        judgeCard.addView(cardTitle("判断接口（旧模式）"))
-        judgeCard.addView(text("读对方消息、给意图判断和候选排序。只有关掉「翻译模式」时才需要。", 12f, sub))
-
-        val judgeBaseEdit = edit(prefs.judgeBaseUrl, Prefs.DEFAULT_JUDGE_BASE_OPENROUTER)
-        val judgeModelEdit = edit(prefs.judgeModel, Prefs.DEFAULT_JUDGE_MODEL_OPENROUTER)
-        judgeProviderIdx = when (prefs.judgeProvider) {
-            Prefs.PROVIDER_OPENROUTER -> 0
-            Prefs.PROVIDER_BOCHA -> 1
-            Prefs.PROVIDER_TYPESAFE -> 2
-            Prefs.PROVIDER_VERCEL -> 3
-            Prefs.PROVIDER_ZEN -> 4
-            Prefs.PROVIDER_CUSTOM -> 5
-            else -> 0
-        }
-
-        // Address wins over the pill: a preset HOST in the box means that
-        // preset's provider (and so its path), whatever the pill last said.
-        fun saveJudge() {
-            val judgeBaseTyped = judgeBaseEdit.text.toString().trim()
-            val judgeProv = resolveJudgeProvider(judgeProviderIdx, judgeBaseTyped)
-            val judgeModelTyped = judgeModelEdit.text.toString().trim()
-            prefs.judgeProvider = judgeProv
-            // Blank falls back to THIS provider's preset — never OpenRouter's by
-            // default. Custom is left exactly as typed (blank included): guessing
-            // a URL for it would silently point somewhere the user did not choose.
-            prefs.judgeBaseUrl = when {
-                judgeBaseTyped.isNotBlank() -> judgeBaseTyped
-                judgeProv == Prefs.PROVIDER_CUSTOM -> ""
-                else -> defaultJudgeBase(judgeProv)
-            }
-            prefs.judgeKey = judgeKeyEdit.text.toString()
-            prefs.judgeModel = when {
-                judgeModelTyped.isNotBlank() -> judgeModelTyped
-                judgeProv == Prefs.PROVIDER_CUSTOM -> ""
-                else -> defaultJudgeModel(judgeProv)
-            }
-        }
-
-        // Bocha promo block — official address + one-tap copy (limited-time free).
-        // Shown ONLY when Bocha Jev is the selected provider; picking any other
-        // provider hides it. It used to be added unconditionally, which made every
-        // tab look like it was still showing Bocha.
-        val bochaBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val bochaRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(12), 0, dp(4))
-        }
-        bochaRow.addView(text("${Prefs.DEFAULT_JUDGE_BASE_BOCHA}（限时免费）", 12.5f, ink).apply {
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        })
-        bochaRow.addView(TextView(this).apply {
-            text = "复制"; textSize = 13f; gravity = Gravity.CENTER
-            setTypeface(typeface, Typeface.BOLD)
-            setTextColor(accent); background = round(dp(10), color(pal.surface), stroke = true)
-            setPadding(dp(16), dp(8), dp(16), dp(8))
-            setOnClickListener {
-                val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                cm.setPrimaryClip(android.content.ClipData.newPlainText(
-                    "jev_bocha", Prefs.DEFAULT_JUDGE_BASE_BOCHA))
-                Toast.makeText(this@SettingsActivity, "已复制", Toast.LENGTH_SHORT).show()
-            }
-        })
-        bochaBox.addView(bochaRow)
-        bochaBox.addView(text("去 jev.bocha.cn 领取限时免费 API Key", 11f, sub))
-        bochaBox.visibility = if (judgeProviderIdx == 1) View.VISIBLE else View.GONE
-
-        judgeCard.addView(pills(
-            listOf("OpenRouter", "博查 Jev", "TypeSafe 直连", "Vercel", "OpenCode Zen", "自定义"), judgeProviderIdx) { idx ->
-            judgeProviderIdx = idx
-            when (idx) {
-                0 -> {
-                    judgeBaseEdit.setText(Prefs.DEFAULT_JUDGE_BASE_OPENROUTER)
-                    judgeModelEdit.setText(Prefs.DEFAULT_JUDGE_MODEL_OPENROUTER)
-                }
-                1 -> {
-                    judgeBaseEdit.setText(Prefs.DEFAULT_JUDGE_BASE_BOCHA)
-                    judgeModelEdit.setText(Prefs.DEFAULT_JUDGE_MODEL_BOCHA)
-                }
-                2 -> {
-                    judgeBaseEdit.setText(Prefs.DEFAULT_JUDGE_BASE_TYPESAFE)
-                    judgeModelEdit.setText(Prefs.DEFAULT_JUDGE_MODEL_TYPESAFE)
-                }
-                3 -> {
-                    judgeBaseEdit.setText(Prefs.DEFAULT_JUDGE_BASE_VERCEL)
-                    judgeModelEdit.setText(Prefs.DEFAULT_JUDGE_MODEL_VERCEL)
-                }
-                4 -> {
-                    judgeBaseEdit.setText(Prefs.DEFAULT_JUDGE_BASE_ZEN)
-                    judgeModelEdit.setText(Prefs.DEFAULT_JUDGE_MODEL_ZEN)
-                }
-                // Custom POSTs the box verbatim, so a preset HOST left in the box
-                // would hit the API root. Expand it into the full endpoint the
-                // preset would have used; anything hand-typed is left alone.
-                5 -> judgeBaseEdit.setText(expandJudgeUrl(judgeBaseEdit.text.toString()))
-            }
-            bochaBox.visibility = if (idx == 1) View.VISIBLE else View.GONE
-            saveJudge()   // 即改即存：胶囊点击立即落盘
-        })
-        judgeCard.addView(label("Base URL"))
-        judgeBaseEdit.saveDebounced { saveJudge() }
-        judgeCard.addView(judgeBaseEdit)
-        judgeCard.addView(bochaBox)
-        judgeCard.addView(label("密钥"))
-        judgeCard.addView(edit(prefs.judgeKey, "sk-...", password = true).also {
-            judgeKeyEdit = it
-            it.saveDebounced { saveJudge() }
-        })
-        judgeCard.addView(pasteBtn(judgeKeyEdit))
-        judgeCard.addView(label("模型"))
-        judgeModelEdit.saveDebounced { saveJudge() }
-        judgeCard.addView(judgeModelEdit)
-        val judgeResult = resultText()
-        judgeCard.addView(cardBtn("测试判断") {
-            val base = judgeBaseEdit.text.toString().trim()
-            val key = judgeKeyEdit.text.toString().trim()
-            val model = judgeModelEdit.text.toString().trim()
-            if (key.isBlank()) { judgeResult.text = "请先填密钥"; return@cardBtn }
-            judgeResult.text = "测试中…"
-            // Provider follows the address when it is still a known preset host,
-            // so a stale pill selection cannot send a TypeSafe path to OpenRouter.
-            val provider = resolveJudgeProvider(judgeProviderIdx, base)
-            if (provider == Prefs.PROVIDER_CUSTOM && base.isBlank()) {
-                judgeResult.text = "自定义档要填完整 URL（带路径）"; return@cardBtn
-            }
-            // Custom means we know nothing about the endpoint — guessing a model
-            // name here would test something the user never asked for.
-            if (provider == Prefs.PROVIDER_CUSTOM && model.isBlank()) {
-                judgeResult.text = "请填写模型名"; return@cardBtn
-            }
-            val probe = draftPrefs(SCRATCH_JUDGE) {
-                judgeProvider = provider
-                judgeBaseUrl = base.ifBlank { defaultJudgeBase(provider) }
-                judgeKey = key
-                judgeModel = model.ifBlank { defaultJudgeModel(provider) }
-            }
-            worker.execute {
-                val t0 = System.currentTimeMillis()
-                val demo = ChatSnapshot("连通测试", listOf(
-                    Msg("other", "在吗？"), Msg("me", "在")))
-                val a = JudgeClient(probe).judge(demo, prefs.relationship)
-                val ms = System.currentTimeMillis() - t0
-                main.post {
-                    judgeResult.text = if (a.error != null) "失败（${ms}ms）：${a.error}"
-                    else "成功 · ${ms}ms"
-                }
-            }
-        })
-        judgeCard.addView(judgeResult)
-        advancedBox.addView(judgeCard)
 
         // --- 回复接口 ---
         val replyCard = card()
@@ -266,18 +106,19 @@ class SettingsActivity : AppCompatActivity() {
             prefs.replyModel = replyModelEdit.text.toString().trim().ifBlank { Prefs.DEFAULT_REPLY_MODEL }
         }
 
+        // D5：provider 砍到三个。地址优先于胶囊：框里是已知预设 HOST 就选中对应档，
+        // 其它（含老数据里的通义地址）一律落在「自定义」。
         val replyIdx = when (prefs.replyBaseUrl.trim().trimEnd('/')) {
-            Prefs.DEFAULT_REPLY_BASE -> 0
-            Prefs.DEEPSEEK_BASE -> 1
-            Prefs.DASHSCOPE_BASE -> 2
-            else -> 3
+            Prefs.DEEPSEEK_BASE -> 0
+            Prefs.DEFAULT_REPLY_BASE -> 1
+            else -> 2
         }
         replyCard.addView(pills(
-            listOf("OpenRouter", "DeepSeek 官方", "通义兼容", "自定义"), replyIdx) { idx ->
+            listOf("DeepSeek 官方", "OpenRouter", "自定义"), replyIdx) { idx ->
             when (idx) {
-                0 -> { replyBaseEdit.setText(Prefs.DEFAULT_REPLY_BASE); replyModelEdit.setText(Prefs.DEFAULT_REPLY_MODEL) }
-                1 -> { replyBaseEdit.setText(Prefs.DEEPSEEK_BASE); replyModelEdit.setText(Prefs.DEEPSEEK_MODEL) }
-                2 -> { replyBaseEdit.setText(Prefs.DASHSCOPE_BASE); replyModelEdit.setText(Prefs.DASHSCOPE_MODEL) }
+                0 -> { replyBaseEdit.setText(Prefs.DEEPSEEK_BASE); replyModelEdit.setText(Prefs.DEEPSEEK_MODEL) }
+                1 -> { replyBaseEdit.setText(Prefs.DEFAULT_REPLY_BASE); replyModelEdit.setText(Prefs.DEFAULT_REPLY_MODEL) }
+                // 自定义：不回填，用户框里是什么就发什么
             }
             saveReply()   // 即改即存
         })
@@ -285,7 +126,7 @@ class SettingsActivity : AppCompatActivity() {
         replyBaseEdit.saveDebounced { saveReply() }
         replyCard.addView(replyBaseEdit)
         replyCard.addView(label("密钥"))
-        replyCard.addView(edit(prefs.replyKey, "留空则用判断接口密钥", password = true).also {
+        replyCard.addView(edit(prefs.replyKey, "sk-...", password = true).also {
             replyKeyEdit = it
             it.saveDebounced { saveReply() }
         })
@@ -298,12 +139,11 @@ class SettingsActivity : AppCompatActivity() {
             val base = replyBaseEdit.text.toString().trim()
             val model = replyModelEdit.text.toString().trim()
             val probe = draftPrefs(SCRATCH_REPLY) {
-                judgeKey = judgeKeyEdit.text.toString().trim()
                 replyBaseUrl = base.ifBlank { Prefs.DEFAULT_REPLY_BASE }
                 replyKey = replyKeyEdit.text.toString().trim()
                 replyModel = model.ifBlank { Prefs.DEFAULT_REPLY_MODEL }
             }
-            if (probe.effectiveReplyKey().isBlank()) { replyResult.text = "请先填密钥（或填判断接口密钥）"; return@cardBtn }
+            if (probe.effectiveReplyKey().isBlank()) { replyResult.text = "请先填密钥"; return@cardBtn }
             replyResult.text = "测试中…"
             worker.execute {
                 val t0 = System.currentTimeMillis()
@@ -368,14 +208,13 @@ class SettingsActivity : AppCompatActivity() {
                 return@cardBtn
             }
             val probe = draftPrefs(SCRATCH_VISION) {
-                judgeKey = judgeKeyEdit.text.toString().trim()
                 replyBaseUrl = replyBaseEdit.text.toString().trim().ifBlank { Prefs.DEFAULT_REPLY_BASE }
                 replyKey = replyKeyEdit.text.toString().trim()
                 visionBaseUrl = visionBase
                 visionKey = visionKeyEdit.text.toString().trim()
                 visionModel = visionModelEdit.text.toString().trim().ifBlank { Prefs.DEFAULT_VISION_MODEL }
             }
-            if (probe.effectiveVisionKey().isBlank()) { visionResult.text = "请先填密钥（或填回复/判断接口密钥）"; return@cardBtn }
+            if (probe.effectiveVisionKey().isBlank()) { visionResult.text = "请先填密钥（或填回复接口密钥）"; return@cardBtn }
             visionResult.text = "测试中…"
             worker.execute {
                 val t0 = System.currentTimeMillis()
@@ -411,7 +250,8 @@ class SettingsActivity : AppCompatActivity() {
         advancedBox.addView(ctxCard)
 
         // --- 「高级」折叠条：点击只切 visibility，容器与卡内状态不重建、不丢失 ---
-        var advancedFolded = OverlayRules.foldAdvancedByDefault(prefs.bilingualMode)
+        // Sprint 5：判断卡已删，高级区默认折叠写死为 true（原 foldAdvancedByDefault 随之删除）。
+        var advancedFolded = true
         val foldArrow = text("", 13f, accent, bold = true)
         fun setAdvancedFolded(folded: Boolean) {
             advancedFolded = folded
@@ -432,7 +272,7 @@ class SettingsActivity : AppCompatActivity() {
             }
             setOnClickListener { setAdvancedFolded(!advancedFolded) }
         }
-        foldBar.addView(text("高级：判断接口 · 识图 · 上下文", 13f, sub, bold = true).apply {
+        foldBar.addView(text("高级：识图 · 上下文", 13f, sub, bold = true).apply {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         })
         foldBar.addView(foldArrow)
@@ -460,20 +300,12 @@ class SettingsActivity : AppCompatActivity() {
             prefs.autoAnalyze = on
         }
         card2.addView(autoRow)
-        val wechatRow = toggleRow("微信（实验）", prefs.wechatEnabled) { on ->
+        // D3：新版微信对读屏隐藏消息文字且禁止截屏，开关保留但标注暂不可用。
+        val wechatRow = toggleRow("微信（暂不可用）", prefs.wechatEnabled) { on ->
             prefs.wechatEnabled = on
         }
         card2.addView(wechatRow)
-        card2.addView(text("新版微信对读屏服务隐藏了消息文字，部分设备还禁止截屏，可能读不到。", 11f, sub))
-
-        // --- 翻译模式 ---
-        // §4-3：开关切换时同步高级容器折叠（开→折叠，关→展开），只改 visibility。
-        val bilingualRow = toggleRow("翻译模式：外语翻成中文，用对方语言回", prefs.bilingualMode) { on ->
-            prefs.bilingualMode = on
-            setAdvancedFolded(on)
-        }
-        card2.addView(bilingualRow)
-        card2.addView(text("只用回复接口一把密钥。对方说中文就中文回；说外语就翻成中文给你看，回复附中文意思，填入只填外语。", 11f, sub))
+        card2.addView(text("新版微信对读屏隐藏消息文字且禁止截屏，读不到。开关保留，恢复支持后可用。", 11f, sub))
 
         // --- 截图识别兜底 ---
         val ocrFallbackRow = toggleRow("读不到文字时用截图识别", prefs.ocrFallback) { on ->
@@ -569,7 +401,6 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     // Held as fields because several test buttons read each other's key box.
-    private lateinit var judgeKeyEdit: EditText
     private lateinit var replyKeyEdit: EditText
     private lateinit var visionKeyEdit: EditText
 
@@ -583,57 +414,6 @@ class SettingsActivity : AppCompatActivity() {
             pending = r
             main.postDelayed(r, 400L)
         }
-    }
-
-    private fun providerOf(idx: Int) = when (idx) {
-        1 -> Prefs.PROVIDER_BOCHA
-        2 -> Prefs.PROVIDER_TYPESAFE
-        3 -> Prefs.PROVIDER_VERCEL
-        4 -> Prefs.PROVIDER_ZEN
-        5 -> Prefs.PROVIDER_CUSTOM
-        else -> Prefs.PROVIDER_OPENROUTER
-    }
-
-    /**
-     * The provider actually implied by what is in the address box. A preset host
-     * carries its own path (`/alpha/decisions`, `/v1/systemone`), so leaving that
-     * host in the box while the pill says something else would POST the wrong
-     * path — or, for custom, the bare API root.
-     */
-    private fun resolveJudgeProvider(idx: Int, base: String): String =
-        when (base.trim().trimEnd('/')) {
-            Prefs.DEFAULT_JUDGE_BASE_BOCHA -> Prefs.PROVIDER_BOCHA
-            Prefs.DEFAULT_JUDGE_BASE_OPENROUTER -> Prefs.PROVIDER_OPENROUTER
-            Prefs.DEFAULT_JUDGE_BASE_TYPESAFE -> Prefs.PROVIDER_TYPESAFE
-            Prefs.DEFAULT_JUDGE_BASE_VERCEL -> Prefs.PROVIDER_VERCEL
-            Prefs.DEFAULT_JUDGE_BASE_ZEN -> Prefs.PROVIDER_ZEN
-            else -> providerOf(idx)
-        }
-
-    /** The full endpoint a preset host would have been expanded to. */
-    private fun expandJudgeUrl(base: String): String = when (base.trim().trimEnd('/')) {
-        Prefs.DEFAULT_JUDGE_BASE_BOCHA -> Prefs.DEFAULT_JUDGE_BASE_BOCHA + "/v1/systemone"
-        Prefs.DEFAULT_JUDGE_BASE_OPENROUTER -> Prefs.DEFAULT_JUDGE_BASE_OPENROUTER + "/alpha/decisions"
-        Prefs.DEFAULT_JUDGE_BASE_TYPESAFE -> Prefs.DEFAULT_JUDGE_BASE_TYPESAFE + "/v1/systemone"
-        Prefs.DEFAULT_JUDGE_BASE_VERCEL -> Prefs.DEFAULT_JUDGE_BASE_VERCEL + "/v1/systemone"
-        Prefs.DEFAULT_JUDGE_BASE_ZEN -> Prefs.DEFAULT_JUDGE_BASE_ZEN + "/v1/systemone"
-        else -> base.trim()
-    }
-
-    private fun defaultJudgeBase(provider: String): String = when (provider) {
-        Prefs.PROVIDER_BOCHA -> Prefs.DEFAULT_JUDGE_BASE_BOCHA
-        Prefs.PROVIDER_TYPESAFE -> Prefs.DEFAULT_JUDGE_BASE_TYPESAFE
-        Prefs.PROVIDER_VERCEL -> Prefs.DEFAULT_JUDGE_BASE_VERCEL
-        Prefs.PROVIDER_ZEN -> Prefs.DEFAULT_JUDGE_BASE_ZEN
-        else -> Prefs.DEFAULT_JUDGE_BASE_OPENROUTER
-    }
-
-    private fun defaultJudgeModel(provider: String): String = when (provider) {
-        Prefs.PROVIDER_BOCHA -> Prefs.DEFAULT_JUDGE_MODEL_BOCHA
-        Prefs.PROVIDER_TYPESAFE -> Prefs.DEFAULT_JUDGE_MODEL_TYPESAFE
-        Prefs.PROVIDER_VERCEL -> Prefs.DEFAULT_JUDGE_MODEL_VERCEL
-        Prefs.PROVIDER_ZEN -> Prefs.DEFAULT_JUDGE_MODEL_ZEN
-        else -> Prefs.DEFAULT_JUDGE_MODEL_OPENROUTER
     }
 
     /**
@@ -833,7 +613,6 @@ class SettingsActivity : AppCompatActivity() {
             "该接口不支持视觉（DeepSeek 官方没有 image_url），请换 OpenRouter 或通义兼容"
 
         /** One scratch prefs file per test button; never the real config. */
-        private const val SCRATCH_JUDGE = "jev_probe_scratch_judge"
         private const val SCRATCH_REPLY = "jev_probe_scratch_reply"
         private const val SCRATCH_VISION = "jev_probe_scratch_vision"
 

@@ -141,12 +141,4 @@ class OverlayRulesTest {
         val v = OverlayRules.errorView("401 timeout", hasReplyKey = true)
         assertEquals(ErrorAction.OPEN_SETTINGS, v.action)
     }
-
-    // ---- foldAdvancedByDefault ----
-
-    @Test
-    fun `foldAdvancedByDefault follows bilingual mode`() {
-        assertTrue(OverlayRules.foldAdvancedByDefault(true))
-        assertFalse(OverlayRules.foldAdvancedByDefault(false))
-    }
 }

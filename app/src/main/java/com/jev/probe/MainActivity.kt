@@ -91,7 +91,8 @@ class MainActivity : AppCompatActivity() {
 
         val a11y = isA11yEnabled()
         val overlay = Settings.canDrawOverlays(this)
-        val key = if (prefs.bilingualMode) prefs.hasReplyKey() else prefs.hasKey()   // the route the current mode cannot run without
+        // bilingual 是唯一模式（Sprint 5 / D1），就绪只看回复接口密钥
+        val key = prefs.hasReplyKey()
         val ready = a11y && overlay && key
 
         // Readiness card

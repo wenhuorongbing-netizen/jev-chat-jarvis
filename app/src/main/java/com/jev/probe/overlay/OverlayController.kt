@@ -40,10 +40,8 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.core.app.NotificationManagerCompat
-import com.jev.probe.core.Analysis
 import com.jev.probe.core.BilingualResult
 import com.jev.probe.core.Prefs
-import com.jev.probe.core.RankedReply
 import com.jev.probe.core.ui.OverlayRules
 import com.jev.probe.core.ui.OverlayRules.BubbleState
 import com.jev.probe.core.ui.UiTokens
@@ -53,9 +51,10 @@ import kotlin.math.roundToInt
 
 /**
  * Floating overlay: a small draggable bubble that expands into a panel with the
- * translation (bilingual mode) or a one-line read (Jev mode) plus 3 candidate
- * replies. All actions are copy / fill — never send. The panel never opens by
- * itself: the bubble carries every state (idle / loading / ready / error).
+ * translation plus 3 candidate replies (bilingual is the only mode since the
+ * Jev judgment mode was deleted in Sprint 5). All actions are copy / fill —
+ * never send. The panel never opens by itself: the bubble carries every state
+ * (idle / loading / ready / error).
  *
  * Design goals: let the chat show through (adjustable opacity), keep the signal
  * scannable (3 reply cards + one analysis line), and stay out of the way
@@ -71,7 +70,7 @@ class OverlayController(private val ctx: Context) {
     private var root: FrameLayout? = null
     private var bubbleWrap: View? = null
     private var bubble: TextView? = null
-    private var dangerDot: View? = null
+    private var noticeDot: View? = null
     private var panel: LinearLayout? = null
     private var contentBox: LinearLayout? = null
     private var expanded = false
@@ -97,13 +96,6 @@ class OverlayController(private val ctx: Context) {
 
     /** Whether the overlay window is currently on screen. */
     fun isShowing(): Boolean = root != null
-
-    private var lastJudgment: Analysis? = null
-    private var lastFill: ((String) -> Unit)? = null
-
-    /** Set when [showReplies] was handed a draftAndRank failure, so the panel
-     *  can say so instead of silently showing "（未生成候选回复）". */
-    private var replyError: String? = null
 
     private fun isDark(): Boolean =
         ctx.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
@@ -316,7 +308,7 @@ class OverlayController(private val ctx: Context) {
         wrap.addView(b)
         wrap.addView(dot)
         attachBubbleTouch(wrap, params)
-        bubble = b; dangerDot = dot; bubbleWrap = wrap
+        bubble = b; noticeDot = dot; bubbleWrap = wrap
         return wrap
     }
 
@@ -540,7 +532,7 @@ class OverlayController(private val ctx: Context) {
     private fun clearNoticeDot() {
         if (!noticeDotOn) return
         noticeDotOn = false
-        dangerDot?.background = GradientDrawable().apply {
+        noticeDot?.background = GradientDrawable().apply {
             shape = GradientDrawable.OVAL; setColor(Color.TRANSPARENT)
         }
     }
@@ -760,26 +752,22 @@ class OverlayController(private val ctx: Context) {
     }
 
     /**
-     * Drop whatever judgment/candidates/note belonged to the previous
+     * Drop whatever translation/candidates/note belonged to the previous
      * conversation. Call this before showing anything for a different chat
      * window (a different app, or new content in the same one) — otherwise a
-     * leftover [lastJudgment] from a prior conversation can keep [showIdle]
-     * from putting the "分析当前对话" button back, and a leftover [lastFill]
-     * could fill the wrong chat's input box.
+     * leftover result from a prior conversation can keep [showIdle] from
+     * putting the panel back into its empty state.
      */
     fun resetForNewConversation() {
-        lastJudgment = null
-        lastFill = null
         noteText = null
-        replyError = null
         hasResult = false; loading = false
         headerLabel?.text = ""
         headerLabel?.visibility = View.VISIBLE
         cancelContentAnimators()
         contentBox?.removeAllViews()
-        // 红点（通知提醒 / 危险提醒）随旧会话一起清掉
+        // 红点（通知提醒）随旧会话一起清掉
         noticeDotOn = false
-        dangerDot?.background = GradientDrawable().apply {
+        noticeDot?.background = GradientDrawable().apply {
             shape = GradientDrawable.OVAL; setColor(Color.TRANSPARENT)
         }
         setBubble(BubbleState.IDLE)
@@ -827,12 +815,10 @@ class OverlayController(private val ctx: Context) {
         box
     }
 
-    /** [open] 保留签名兼容调用方：面板永不自动弹出，加载状态由气泡承载，
-     *  面板永远等用户点。 */
-    fun showLoading(open: Boolean = false) {
+    /** 面板永不自动弹出，加载状态由气泡承载，面板永远等用户点。 */
+    fun showLoading() {
         ensureRoot()
         ctxNotes = 0; ctxHistory = 0   // counts for the round that is starting
-        replyError = null              // this round has not failed (yet)
         loading = true; hasResult = false
         setBubble(BubbleState.LOADING)
         // 加载态面板背景与就绪态一致：不透明 surface
@@ -894,34 +880,17 @@ class OverlayController(private val ctx: Context) {
             hint(msg)))
         hasResult = true   // 面板里是提示内容：点气泡打开时不要触发「生成」
         noticeDotOn = true
-        popDangerDot(GradientDrawable().apply {
+        popNoticeDot(GradientDrawable().apply {
             shape = GradientDrawable.OVAL; setColor(color(pal.accent)); setStroke(dp(2), Color.WHITE)
         })
     }
 
-    fun showJudgment(a: Analysis) {
-        lastJudgment = a
-        render(a, generating = true)
-    }
-
-    fun showReplies(ranked: List<RankedReply>, error: String? = null, onFill: (String) -> Unit) {
-        lastFill = onFill
-        replyError = error
-        // 隐私：失败细节只打长度，不打内容（SPEC A3，原始错误不进 UI）。
-        if (error != null) android.util.Log.d("JEVASSIST", "overlay: replies failed err.len=${error.length}")
-        val a = lastJudgment?.copy(rankedReplies = ranked) ?: return
-        lastJudgment = a
-        render(a, generating = false)
-    }
-
-    /** Bilingual mode: translation of the other side, then 3 target-language
+    /** Bilingual result: translation of the other side, then 3 target-language
      *  replies with Chinese glosses. "填入" fills only the target-language text. */
     fun showBilingual(r: BilingualResult, onFill: (String) -> Unit) {
         ensureRoot()
         // 不透明：候选回复要读清楚，聊天内容透过来会和中文释义叠在一起
         panel?.background = card(UiTokens.RADIUS_PANEL, color(pal.surface), stroke = true)
-        lastFill = onFill
-        lastJudgment = null
         loading = false; hasResult = true
         setBubble(BubbleState.READY)
         // 头部：外语只留语言标签；中文会话整行隐藏
@@ -1045,7 +1014,7 @@ class OverlayController(private val ctx: Context) {
         snackbar = null; snackbarHide = null
         val wrap = bubbleWrap
         root = null; bubble = null; bubbleWrap = null; panel = null; contentBox = null
-        dangerDot = null; expanded = false
+        noticeDot = null; expanded = false
         hasResult = false; loading = false; headerLabel = null; refreshBtn = null
         panelAnimating = false
         bubbleState = null
@@ -1081,58 +1050,6 @@ class OverlayController(private val ctx: Context) {
                 .setStartDelay((i * 40).toLong())
                 .setInterpolator(DecelerateInterpolator())
                 .start()
-        }
-    }
-
-    /** Jev 模式面板：与 bilingual 同构 —— 3 张回复卡 + 一行分析。
-     *  永不自动弹面板；危险分 ≥6 时分析行前加一句 danger 色提醒并点红气泡。 */
-    private fun render(a: Analysis, generating: Boolean) {
-        ensureRoot(); bubble?.alpha = 1f
-        loading = generating; hasResult = true
-        panel?.background = card(UiTokens.RADIUS_PANEL, panelBg(), stroke = true) // re-apply in case opacity changed
-        val views = ArrayList<View>()
-
-        // How this snapshot was captured, when it changes how to read it.
-        noteText?.let { if (it.isNotBlank()) views.add(hint(it)) }
-
-        if (generating) {
-            views.addAll(skeletonCards())
-        } else {
-            val fill = lastFill ?: {}
-            a.rankedReplies.forEachIndexed { i, r ->
-                views.add(replyCard(i + 1, r.text, fill))
-            }
-            if (a.rankedReplies.isEmpty()) {
-                // 原始错误不进 UI（SPEC A3）：区分「生成失败」与「没有候选」即可，
-                // 细节由 showReplies 按长度记进 logcat。
-                val msg = if (replyError != null) "回复接口出错了，点下方重新分析" else "（未生成候选回复）"
-                views.add(hint(msg))
-            }
-        }
-
-        val danger = a.dangerLevel
-        if (danger != null && danger.score >= 6) {
-            tintBubbleDanger(danger.score)
-            views.add(line("注意：对方情绪激动", color(pal.danger), UiTokens.TEXT_META, true).apply {
-                setPadding(0, dp(6), 0, 0)
-            })
-        }
-        analysisLine(a)?.let { views.add(it) }
-
-        views.add(reAnalyzeBtn())
-        setContent(views)
-    }
-
-    /** 一行压缩分析：意图 + 建议动作，11sp 灰字，单行省略。 */
-    private fun analysisLine(a: Analysis): View? {
-        val bits = ArrayList<String>()
-        a.trueIntent?.let { bits.add("对方" + (INTENT[it.choice] ?: it.choice)) }
-        a.bestAction?.let { bits.add(ACTION[it.choice] ?: it.choice) }
-        if (bits.isEmpty()) return null
-        return line(bits.joinToString(" · "), color(pal.sub), UiTokens.TEXT_META).apply {
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-            setPadding(0, dp(6), 0, 0)
         }
     }
 
@@ -1186,38 +1103,11 @@ class OverlayController(private val ctx: Context) {
         return c
     }
 
-    private fun pill(label: String, primary: Boolean, onClick: () -> Unit) = TextView(ctx).apply {
-        text = label; textSize = 13f; gravity = Gravity.CENTER
-        setTypeface(typeface, Typeface.BOLD)
-        setTextColor(if (primary) Color.WHITE else color(pal.accent))
-        background = card(18, color(if (primary) pal.accent else pal.surface), stroke = !primary)
-        setPadding(dp(18), dp(6), dp(18), dp(6))
-        layoutParams = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { rightMargin = dp(8) }
-        setOnClickListener { onClick() }
-    }
-
-    private fun reAnalyzeBtn() = TextView(ctx).apply {
-        text = "重新分析"; textSize = 13f; gravity = Gravity.CENTER
-        setTextColor(color(pal.sub))
-        setPadding(dp(10), dp(10), dp(10), dp(4))
-        setOnClickListener { onManualAnalyze?.invoke() }
-    }
-
-    /** 气泡红点（danger ≥6 才触发，调用方把关）。 */
-    private fun tintBubbleDanger(score: Double) {
-        val color = dangerColor(score.roundToInt())
-        popDangerDot(GradientDrawable().apply {
-            shape = GradientDrawable.OVAL; setColor(color); setStroke(dp(2), Color.WHITE)
-        })
-    }
-
     /** 角标出现动效：换底色 + scale 0→1，180ms Overshoot(1.5)。
      *  清除方（clearNoticeDot / resetForNewConversation）只把底色改透明，
      *  下次出现时从 0 重新弹出。 */
-    private fun popDangerDot(bg: GradientDrawable) {
-        val d = dangerDot ?: return
+    private fun popNoticeDot(bg: GradientDrawable) {
+        val d = noticeDot ?: return
         d.animate().cancel()
         d.background = bg
         d.scaleX = 0f; d.scaleY = 0f
@@ -1245,12 +1135,6 @@ class OverlayController(private val ctx: Context) {
         }
         cm.setPrimaryClip(clip)
         toast("已复制")
-    }
-
-    private fun dangerColor(lvl: Int): Int = when {
-        lvl >= 6 -> color(pal.danger)
-        lvl >= 3 -> color(pal.warn)
-        else -> color(pal.ok)
     }
 
     /** Blend color [a] toward [b] by fraction [t] (0 = a, 1 = b). */
@@ -1281,14 +1165,5 @@ class OverlayController(private val ctx: Context) {
         /** 填入成功提示（与 ChatCaptureService.fillInput 的成功文案一致）——
          *  这条 snackbar 右侧带「换一条」动作。 */
         private const val FILL_OK = "已填入，确认后自己发送"
-
-        private val INTENT = mapOf(
-            "confirm_you_care" to "确认你在不在乎", "vent_anger" to "在发泄情绪",
-            "request_action" to "要你办事", "seek_explanation" to "要个解释",
-            "casual_chat" to "随便聊聊", "close_topic" to "事情过去了")
-        private val ACTION = mapOf(
-            "check_history" to "翻聊天记录", "apologize" to "先道歉", "give_commitment" to "给承诺",
-            "explain" to "解释清楚", "acknowledge" to "接住情绪", "say_less" to "少说两句",
-            "make_plan" to "定个安排")
     }
 }

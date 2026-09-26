@@ -27,7 +27,7 @@ object UiTokens {
         accent = "#4F5BD5",
         accentDeep = "#3F4BC0",
         accentLight = "#8B94EC",
-        accentSoft = "#E8EAFC",
+        accentSoft = "#EEF0FC",
         surfaceElev = "#FFFFFF",
         hairline = "#14000000",
         danger = "#DC2626",

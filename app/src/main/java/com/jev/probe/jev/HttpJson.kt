@@ -8,11 +8,10 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * Which of the three API routes a failure came from. Used to build error text
- * the user can act on ("判断接口 HTTP 401：…" vs "回复接口 …").
+ * Which of the two API routes a failure came from. Used to build error text
+ * the user can act on ("回复接口 HTTP 401：…" vs "视觉接口 …").
  */
 object Route {
-    const val JUDGE = "判断接口"
     const val REPLY = "回复接口"
     const val VISION = "视觉接口"
 }

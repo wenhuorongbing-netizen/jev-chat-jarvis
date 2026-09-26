@@ -20,7 +20,6 @@ import com.jev.probe.core.Msg
 import com.jev.probe.core.Prefs
 import com.jev.probe.core.kb.ContextBuilder
 import com.jev.probe.core.kb.KbStore
-import com.jev.probe.jev.JevClient
 import com.jev.probe.jev.ReplyClient
 import com.jev.probe.overlay.OverlayController
 import java.util.concurrent.Executors
@@ -30,8 +29,8 @@ import java.util.concurrent.RejectedExecutionException
  * The live capture service (registered under a disguised class name so WeChat
  * exposes its node tree — see the disguised subclass). It reads whichever
  * adapted chat app is in the foreground, detects a new incoming message from the
- * other person, runs Jev analysis off the main thread, and drives the floating
- * overlay.
+ * other person, drafts bilingual replies off the main thread, and drives the
+ * floating overlay.
  *
  * Per-app node rules live in [ChatAppAdapter] implementations; everything here
  * is app-agnostic.
@@ -245,8 +244,8 @@ open class ChatCaptureService : AccessibilityService() {
             return
         }
         // Anything else reaching here is a genuinely different conversation (new
-        // app, or new content in this one) — a leftover judgment/candidates from
-        // whatever was shown before must not leak into it.
+        // app, or new content in this one) — leftover results from whatever was
+        // shown before must not leak into it.
         main.post { overlay?.resetForNewConversation() }
         lastSignature = sig
         Log.d(TAG, "snapshot[$pkg] title.len=${snapshot.title?.length ?: 0} n=${snapshot.messages.size} " +
@@ -357,50 +356,14 @@ open class ChatCaptureService : AccessibilityService() {
     private fun runAnalysis() {
         val snapshot = pendingSnapshot ?: return
         if (analyzing) return
-        if (prefs.bilingualMode) { runBilingual(snapshot); return }
-        if (!prefs.hasKey()) { main.post { overlay?.showError("未设置判断接口密钥，去设置里填") }; return }
-        analyzing = true
-        main.post { overlay?.showLoading(open = true); overlay?.setNote(snapshot.note) }
-        val client = JevClient(prefs)
-        val rel = prefs.relationship
-        val pkg = activePkg ?: ""
-        // Knowledge context first (local file reads only, a few ms), then the two
-        // network calls in parallel on the pool. A failure here must never stop
-        // the analysis — it just means no extra context this round.
-        submit {
-            val ctx = try {
-                ContextBuilder.build(this, snapshot, pkg, prefs)
-            } catch (e: Exception) {
-                Log.w(TAG, "context build failed: ${e.javaClass.simpleName}"); null
-            }
-            main.post { overlay?.setContextInfo(ctx?.notes?.size ?: 0, ctx?.history?.size ?: 0) }
-
-            // Judgment is fast (~1s) — show it immediately.
-            submit {
-                val judgment = client.judge(snapshot, rel, ctx)
-                main.post {
-                    if (judgment.error != null) { analyzing = false; overlay?.showError(judgment.error) }
-                    else overlay?.showJudgment(judgment)
-                }
-            }
-            // Candidate replies are slower (generative + rank) — fill in when ready.
-            submit {
-                var replyError: String? = null
-                val ranked = try { client.draftAndRank(snapshot, rel, ctx) } catch (e: Exception) {
-                    replyError = e.message ?: e.javaClass.simpleName
-                    emptyList()
-                }
-                main.post {
-                    analyzing = false
-                    overlay?.showReplies(ranked, replyError) { text -> fillInput(text) }
-                }
-            }
-        }
+        // Sprint 5 (D1): the Jev judgment mode is deleted; bilingual is the only
+        // path. The old prefs.bilingualMode flag is deprecated and always true.
+        runBilingual(snapshot)
     }
 
     /**
-     * Bilingual mode: no Jev call at all. One reply-route round trip returns
-     * the Chinese translation of the other side plus 3 target-language replies
+     * The one and only pipeline: a single reply-route round trip returns the
+     * Chinese translation of the other side plus 3 target-language replies
      * with Chinese glosses; "填入" fills only the target-language text.
      */
     private fun runBilingual(snapshot: ChatSnapshot) {

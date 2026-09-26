@@ -37,22 +37,6 @@ data class ChatSnapshot(
         messages.takeLast(6).joinToString("|") { "${it.side}:${it.text}" }
 }
 
-/** Jev's judgment result for one snapshot, plus the ranked candidate replies. */
-data class Analysis(
-    val trueIntent: Choice?,
-    val dangerLevel: Score?,
-    val sheNeeds: Choice?,
-    val shouldReplyNow: Double?,
-    val bestAction: Choice?,
-    val tensionResolved: Double?,
-    val literalQuestion: Double?,
-    val rankedReplies: List<RankedReply>,
-    val latencyMs: Long,
-    val error: String? = null
-)
-
-data class Choice(val choice: String, val confidence: Double, val probabilities: Map<String, Double>)
-data class Score(val score: Double, val confidence: Double, val maxLevel: Int)
 /** [zh] is the Chinese gloss shown under a foreign-language reply in bilingual
  *  mode; only [text] is ever filled into the input box. */
 data class RankedReply(val text: String, val prob: Double, val zh: String = "")
