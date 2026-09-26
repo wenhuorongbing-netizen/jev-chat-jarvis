@@ -100,7 +100,7 @@ class MainActivity : AppCompatActivity() {
 
         // Permission checklist
         container.addView(sectionLabel("权限设置"))
-        container.addView(permCard("无障碍权限", "读取当前聊天窗口的消息文字（在列表里找到『Jev助手』）", a11y) {
+        container.addView(permCard("无障碍权限", "读取当前聊天窗口的消息文字（在列表里找到『Jev 聊天助手』）", a11y) {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         })
         container.addView(permCard("悬浮窗权限", "在聊天窗口上方显示分析卡片", overlay) {
@@ -139,7 +139,9 @@ class MainActivity : AppCompatActivity() {
         c.addView(head)
         c.addView(checkLine("无障碍", a11y))
         c.addView(checkLine("悬浮窗", overlay))
-        c.addView(checkLine("密钥", key, okWord = "已设", noWord = "未设"))
+        c.addView(checkLine("密钥", key, okWord = "已设", noWord = "未设 · 去设置 »") {
+            startActivity(Intent(this, SettingsActivity::class.java))
+        })
         return c
     }
 
@@ -158,7 +160,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun checkLine(label: String, ok: Boolean, okWord: String = "已开", noWord: String = "未开"): View {
+    private fun checkLine(label: String, ok: Boolean, okWord: String = "已开", noWord: String = "未开",
+                          onMissing: (() -> Unit)? = null): View {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(4), 0, 0)
@@ -166,7 +169,10 @@ class MainActivity : AppCompatActivity() {
         row.addView(text(if (ok) "✓" else "✗", 14f, if (ok) green else red, bold = true).apply {
             (this as TextView).width = dp(22)
         })
-        row.addView(text(label + (if (ok) okWord else noWord), 13f, sub))
+        // 未达标且给了去向时整行可点：文字换 accent 色，作为 onboarding 的直达入口。
+        val fixable = !ok && onMissing != null
+        row.addView(text(label + (if (ok) okWord else noWord), 13f, if (fixable) accent else sub))
+        if (fixable) row.setOnClickListener { onMissing?.invoke() }
         return row
     }
 

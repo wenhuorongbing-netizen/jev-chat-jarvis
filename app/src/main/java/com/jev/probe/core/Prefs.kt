@@ -10,6 +10,9 @@ import android.util.Log
  *
  * Key handling: stored in app-private SharedPreferences (not world-readable,
  * never logged, never in code/git). Only key *lengths* are ever logged.
+ * The three API keys are additionally encrypted at rest via [KeyVault]
+ * (Android Keystore AES/GCM, `v1:` format) — the public getters/setters
+ * below still speak plaintext; the disk only ever sees ciphertext.
  */
 class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
 
@@ -80,9 +83,13 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         get() = sp.getString(K_JUDGE_BASE, DEFAULT_JUDGE_BASE_OPENROUTER) ?: DEFAULT_JUDGE_BASE_OPENROUTER
         set(v) = sp.edit().putString(K_JUDGE_BASE, v.trim()).apply()
 
+    /**
+     * Plaintext in / plaintext out — encryption is a storage detail, see
+     * [readSecret]/[writeSecret]. Disk holds `v1:` AES/GCM ciphertext.
+     */
     var judgeKey: String
-        get() = sp.getString(K_JUDGE_KEY, "") ?: ""
-        set(v) = sp.edit().putString(K_JUDGE_KEY, v.trim()).apply()
+        get() = readSecret(K_JUDGE_KEY)
+        set(v) = writeSecret(K_JUDGE_KEY, v)
 
     var judgeModel: String
         get() = sp.getString(K_JUDGE_MODEL, DEFAULT_JUDGE_MODEL_OPENROUTER) ?: DEFAULT_JUDGE_MODEL_OPENROUTER
@@ -100,10 +107,10 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         get() = sp.getString(K_REPLY_BASE, DEFAULT_REPLY_BASE) ?: DEFAULT_REPLY_BASE
         set(v) = sp.edit().putString(K_REPLY_BASE, v.trim()).apply()
 
-    /** Blank = fall back to [judgeKey]. */
+    /** Blank = fall back to [judgeKey]. Plaintext in/out, ciphertext at rest. */
     var replyKey: String
-        get() = sp.getString(K_REPLY_KEY, "") ?: ""
-        set(v) = sp.edit().putString(K_REPLY_KEY, v.trim()).apply()
+        get() = readSecret(K_REPLY_KEY)
+        set(v) = writeSecret(K_REPLY_KEY, v)
 
     /** Generative model for drafting the 3 candidate replies. */
     var replyModel: String
@@ -121,10 +128,10 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         get() = sp.getString(K_VISION_BASE, DEFAULT_VISION_BASE) ?: DEFAULT_VISION_BASE
         set(v) = sp.edit().putString(K_VISION_BASE, v.trim()).apply()
 
-    /** Blank = fall back to [replyKey] then [judgeKey]. */
+    /** Blank = fall back to [replyKey] then [judgeKey]. Plaintext in/out, ciphertext at rest. */
     var visionKey: String
-        get() = sp.getString(K_VISION_KEY, "") ?: ""
-        set(v) = sp.edit().putString(K_VISION_KEY, v.trim()).apply()
+        get() = readSecret(K_VISION_KEY)
+        set(v) = writeSecret(K_VISION_KEY, v)
 
     var visionModel: String
         get() = sp.getString(K_VISION_MODEL, DEFAULT_VISION_MODEL) ?: DEFAULT_VISION_MODEL
@@ -239,6 +246,41 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         get() = sp.getBoolean(K_WECHAT, false)
         set(v) = sp.edit().putBoolean(K_WECHAT, v).apply()
     // ------------------------------------------------------------- helpers
+
+    /**
+     * Secret read path for the three API keys. Decides via [KeyVaultCodec]:
+     * blank -> ""; `v1:` -> Keystore decrypt; legacy plaintext -> returned
+     * as-is AND lazily re-written as ciphertext so storage upgrades itself
+     * without a migration pass. The write-back swallows Keystore failures
+     * (the getter must never break a previously working plaintext read);
+     * the disk value then simply upgrades on the next read or set instead.
+     */
+    private fun readSecret(storageKey: String): String {
+        val stored = sp.getString(storageKey, "") ?: ""
+        return when (KeyVaultCodec.classify(stored)) {
+            KeyVaultCodec.StoredAction.EMPTY -> ""
+            KeyVaultCodec.StoredAction.DECRYPT -> KeyVault.decrypt(stored)
+            KeyVaultCodec.StoredAction.PLAINTEXT_MIGRATE -> {
+                try {
+                    sp.edit().putString(storageKey, KeyVault.encrypt(stored)).apply()
+                } catch (e: Exception) {
+                    Log.w(TAG, "keyVault lazy migrate failed key=$storageKey len=${stored.length}")
+                }
+                stored
+            }
+        }
+    }
+
+    /**
+     * Secret write path: blank clears the entry, anything else is stored as
+     * `v1:` ciphertext. Keystore failures propagate — the caller (settings
+     * save) decides how to surface them.
+     */
+    private fun writeSecret(storageKey: String, plain: String) {
+        val trimmed = plain.trim()
+        val stored = if (trimmed.isEmpty()) "" else KeyVault.encrypt(trimmed)
+        sp.edit().putString(storageKey, stored).apply()
+    }
 
     /** Reply route key, falling back to the judge key. */
     fun effectiveReplyKey(): String = replyKey.ifBlank { judgeKey }

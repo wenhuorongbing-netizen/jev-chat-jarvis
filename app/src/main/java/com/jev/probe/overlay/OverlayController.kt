@@ -7,6 +7,11 @@ import android.animation.ArgbEvaluator
 import android.animation.ObjectAnimator
 import android.animation.PropertyValuesHolder
 import android.animation.ValueAnimator
+import android.app.AppOpsManager
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
@@ -14,6 +19,9 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.os.PersistableBundle
 import android.provider.Settings
 import android.text.TextUtils
@@ -31,6 +39,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.core.app.NotificationManagerCompat
 import com.jev.probe.core.Analysis
 import com.jev.probe.core.BilingualResult
 import com.jev.probe.core.Prefs
@@ -105,6 +114,126 @@ class OverlayController(private val ctx: Context) {
 
     private fun canOverlay(): Boolean = Settings.canDrawOverlays(ctx)
 
+    // ------------------------------------------------- overlay permission self-heal
+    //
+    // HyperOS/MIUI 上 `appops allow` 会被系统瞬间回收，canDrawOverlays() 回到
+    // false。老逻辑只打一行 log 就 return，所有 show* 静默 no-op，用户看到的是
+    // 助手凭空消失且毫无提示。这里做三件事：2s/5s/15s 退避重试（≤3 次）、
+    // AppOps 监听撤销/恢复、重试耗尽后发一条引导通知（同一掉权周期只发一次）。
+
+    private val appOps = ctx.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /** 本轮掉权已排期的重试次数；权限恢复（或本就可用）时清零，开启新一轮。 */
+    private var permRetryCount = 0
+
+    /** 已有一次重试在 Handler 里排队：show* 反复进来时不重复排。 */
+    private var permRetryQueued = false
+
+    /** 「canDrawOverlays=false」一条掉权周期只打一次，不再刷屏。 */
+    private var permLogged = false
+
+    /** 引导通知一条掉权周期只发一次。 */
+    private var permNotified = false
+
+    /** 待恢复：撤销时若窗口在屏上会被拆掉；恢复后由下一个 show*（或退避回调）自然重建。 */
+    private var pendingRestore = false
+
+    private var opsWatching = false
+
+    /** 退避回调就是重新走一遍 ensureRoot：权限回来了则内部重置周期、重建并播
+     *  气泡入场动画；仍 false 则继续退避，耗尽后引导通知。 */
+    private val permRetryTask = Runnable { permRetryQueued = false; ensureRoot() }
+
+    /** 授权模式变化回调（HyperOS 瞬收 appops 授权会触发）。回调线程不定，统一切回主线程。 */
+    private val opsListener = AppOpsManager.OnOpChangedListener { op, pkg ->
+        if (op != AppOpsManager.OPSTR_SYSTEM_ALERT_WINDOW || pkg != ctx.packageName) return@OnOpChangedListener
+        mainHandler.post { if (canOverlay()) onPermRestored() else onPermRevoked() }
+    }
+
+    init {
+        appOps.startWatchingMode(AppOpsManager.OPSTR_SYSTEM_ALERT_WINDOW, ctx.packageName, opsListener)
+        opsWatching = true
+    }
+
+    /** canDrawOverlays=false 的唯一入口：一条周期一条 log，退避 ≤3 次，用尽后引导一次。 */
+    private fun onPermMissing() {
+        if (!permLogged) {
+            permLogged = true
+            android.util.Log.w("JEVASSIST", "overlay: canDrawOverlays=false, backoff retry scheduled")
+        }
+        if (permRetryQueued) return
+        if (permRetryCount >= PERM_BACKOFF.size) { notifyOverlayPermLostOnce(); return }
+        mainHandler.postDelayed(permRetryTask, PERM_BACKOFF[permRetryCount])
+        permRetryQueued = true
+        permRetryCount++
+    }
+
+    /** 权限回来了：重置掉权周期（下一轮掉权可重新 log / 通知），并撤掉还挂着的引导通知。 */
+    private fun onPermRestored() {
+        if (permLogged) {
+            android.util.Log.i("JEVASSIST",
+                "overlay: canDrawOverlays=true again" + if (pendingRestore) ", rebuild on next show" else "")
+        }
+        if (permNotified) {
+            runCatching {
+                (ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+                    .cancel(NOTIF_OVERLAY_LOST)
+            }
+        }
+        permRetryCount = 0; permLogged = false; permNotified = false; pendingRestore = false
+    }
+
+    /** AppOps 回调：授权被撤销。窗口在屏上就先拆掉并进入待恢复，然后走退避/通知周期。 */
+    private fun onPermRevoked() {
+        pendingRestore = true
+        if (root != null) {
+            android.util.Log.w("JEVASSIST", "overlay: permission revoked while showing, hiding")
+            hide()
+        }
+        onPermMissing()
+    }
+
+    /** 连续重试仍 false：发一条引导通知（autoCancel，点击跳本应用的悬浮窗设置页）。
+     *  POST_NOTIFICATIONS 未授予时只打 log，不调用 notify，不崩。 */
+    private fun notifyOverlayPermLostOnce() {
+        if (permNotified) return
+        permNotified = true
+        android.util.Log.w("JEVASSIST", "overlay: still false after ${PERM_BACKOFF.size} retries")
+        if (!NotificationManagerCompat.from(ctx).areNotificationsEnabled()) {
+            android.util.Log.w("JEVASSIST", "overlay: notifications off, skip permission guide")
+            return
+        }
+        val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_STATUS, "Jev 助手状态", NotificationManager.IMPORTANCE_DEFAULT))
+        val tap = PendingIntent.getActivity(ctx, 0,
+            Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${ctx.packageName}"))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val notif = Notification.Builder(ctx, CHANNEL_STATUS)
+            .setContentTitle("悬浮窗权限被收回了")
+            .setContentText("点这里重新开启")
+            .setSmallIcon(android.R.drawable.ic_menu_edit)
+            .setContentIntent(tap)
+            .setAutoCancel(true)
+            .build()
+        runCatching { nm.notify(NOTIF_OVERLAY_LOST, notif) }
+    }
+
+    /** 服务销毁时调用：摘掉 AppOps 监听、取消排队中的退避重试、拆掉窗口。幂等。
+     *  接线点：ChatCaptureService.onDestroy 里 `overlay?.hide()` 那一行换成
+     *  `overlay?.destroy()`（destroy 内含 hide）。 */
+    fun destroy() {
+        mainHandler.removeCallbacks(permRetryTask)
+        permRetryQueued = false
+        if (opsWatching) {
+            runCatching { appOps.stopWatchingMode(opsListener) }
+            opsWatching = false
+        }
+        hide()
+    }
+
     private val screenW get() = ctx.resources.displayMetrics.widthPixels
     private val screenH get() = ctx.resources.displayMetrics.heightPixels
 
@@ -125,7 +254,8 @@ class OverlayController(private val ctx: Context) {
 
     private fun ensureRoot() {
         if (root != null) return
-        if (!canOverlay()) { android.util.Log.w("JEVASSIST", "overlay: canDrawOverlays=false"); return }
+        if (!canOverlay()) { onPermMissing(); return }
+        onPermRestored()  // 权限在：掉权周期归零（没掉过权时是无害 no-op）
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -148,14 +278,19 @@ class OverlayController(private val ctx: Context) {
         root = r
         try {
             wm.addView(r, params)
-            // 气泡出现：scale 0.6→1 + alpha 0→1，带一点弹性
-            wrap.scaleX = 0.6f; wrap.scaleY = 0.6f; wrap.alpha = 0f
-            wrap.animate().scaleX(1f).scaleY(1f).alpha(1f)
-                .setDuration(180).setInterpolator(OvershootInterpolator(1.2f)).start()
+            playBubbleEntrance(wrap)
         } catch (e: Exception) {
             android.util.Log.e("JEVASSIST", "overlay addView failed: ${e.message}")
             root = null; bubbleWrap = null
         }
+    }
+
+    /** 气泡出现：scale 0.6→1 + alpha 0→1，带一点弹性。首次创建与掉权恢复后的
+     *  重建都走 ensureRoot 这一条路径，所以恢复重建时入场动画同样生效。 */
+    private fun playBubbleEntrance(wrap: View) {
+        wrap.scaleX = 0.6f; wrap.scaleY = 0.6f; wrap.alpha = 0f
+        wrap.animate().scaleX(1f).scaleY(1f).alpha(1f)
+            .setDuration(180).setInterpolator(OvershootInterpolator(1.2f)).start()
     }
 
     private fun buildBubble(params: WindowManager.LayoutParams): View {
@@ -759,9 +894,9 @@ class OverlayController(private val ctx: Context) {
             hint(msg)))
         hasResult = true   // 面板里是提示内容：点气泡打开时不要触发「生成」
         noticeDotOn = true
-        dangerDot?.background = GradientDrawable().apply {
+        popDangerDot(GradientDrawable().apply {
             shape = GradientDrawable.OVAL; setColor(color(pal.accent)); setStroke(dp(2), Color.WHITE)
-        }
+        })
     }
 
     fun showJudgment(a: Analysis) {
@@ -850,6 +985,7 @@ class OverlayController(private val ctx: Context) {
             background = card(20, Color.argb(199, 0, 0, 0)) // 黑 78%
             setPadding(dp(14), dp(8), dp(14), dp(8))
             alpha = 0f
+            translationY = dp(8).toFloat()  // 入场：随 120ms 淡入并行上滑 8dp→0
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
@@ -885,7 +1021,7 @@ class OverlayController(private val ctx: Context) {
             }.start()
         }
         snackbarHide = hideRun
-        pill.animate().alpha(1f).setDuration(120).withEndAction {
+        pill.animate().alpha(1f).translationY(0f).setDuration(120).withEndAction {
             pill.postDelayed(hideRun, 1600)
         }.start()
     }
@@ -1072,9 +1208,21 @@ class OverlayController(private val ctx: Context) {
     /** 气泡红点（danger ≥6 才触发，调用方把关）。 */
     private fun tintBubbleDanger(score: Double) {
         val color = dangerColor(score.roundToInt())
-        dangerDot?.background = GradientDrawable().apply {
+        popDangerDot(GradientDrawable().apply {
             shape = GradientDrawable.OVAL; setColor(color); setStroke(dp(2), Color.WHITE)
-        }
+        })
+    }
+
+    /** 角标出现动效：换底色 + scale 0→1，180ms Overshoot(1.5)。
+     *  清除方（clearNoticeDot / resetForNewConversation）只把底色改透明，
+     *  下次出现时从 0 重新弹出。 */
+    private fun popDangerDot(bg: GradientDrawable) {
+        val d = dangerDot ?: return
+        d.animate().cancel()
+        d.background = bg
+        d.scaleX = 0f; d.scaleY = 0f
+        d.animate().scaleX(1f).scaleY(1f).setDuration(180)
+            .setInterpolator(OvershootInterpolator(1.5f)).start()
     }
 
     // --------------------------------------------------------------- helpers
@@ -1122,6 +1270,13 @@ class OverlayController(private val ctx: Context) {
     companion object {
         private const val BUBBLE = 44
         private const val PANEL_W = 292
+
+        /** 掉权退避：2s / 5s / 15s，最多 3 次重试。 */
+        private val PERM_BACKOFF = longArrayOf(2_000L, 5_000L, 15_000L)
+
+        /** 状态通知渠道：与 KeepAliveService.CHANNEL_STATUS 复用同一 id（同名同重要性，重复创建幂等）。 */
+        private const val CHANNEL_STATUS = "jev_status"
+        private const val NOTIF_OVERLAY_LOST = 3
 
         /** 填入成功提示（与 ChatCaptureService.fillInput 的成功文案一致）——
          *  这条 snackbar 右侧带「换一条」动作。 */

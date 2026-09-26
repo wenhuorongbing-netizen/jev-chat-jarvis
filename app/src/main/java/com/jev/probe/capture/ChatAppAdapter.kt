@@ -396,7 +396,7 @@ private val X_TRAILING_DOTS = Regex("""。+$""")
  * is stripped from the tail in that order. Punctuation the user actually typed
  * ("是吗？") survives. Null when there is no separator or nothing is left.
  */
-private fun parseXDesc(desc: String): Pair<String, String>? {
+internal fun parseXDesc(desc: String): Pair<String, String>? {
     val full = desc.indexOf('：')
     val half = desc.indexOf(": ")
     val cut: Int

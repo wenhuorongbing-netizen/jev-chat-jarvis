@@ -748,7 +748,7 @@ open class ChatCaptureService : AccessibilityService() {
         overlay?.onManualAnalyze = null
         overlay?.onSaveContact = null
         overlay?.onOcrCapture = null
-        overlay?.hide()
+        overlay?.destroy()   // 摘 AppOps 监听、撤排队的权限重试，内含 hide()
         overlay = null
         // No debounce timers may outlive the service either.
         main.removeCallbacks(debounce)
