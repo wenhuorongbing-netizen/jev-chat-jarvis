@@ -227,6 +227,17 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         get() = sp.getString(K_BILINGUAL_LANG, DEFAULT_BILINGUAL_LANG) ?: DEFAULT_BILINGUAL_LANG
         set(v) = sp.edit().putString(K_BILINGUAL_LANG, v.trim().ifBlank { DEFAULT_BILINGUAL_LANG }).apply()
 
+
+    /** Who the user is, in their own words — the prompt writes as this person. */
+    var aboutMe: String
+        get() = sp.getString(K_ABOUT_ME, "") ?: ""
+        set(v) = sp.edit().putString(K_ABOUT_ME, v.trim()).apply()
+
+    /** WeChat hides text from most accessibility services and may flag screen
+     *  readers; reading it is opt-in. */
+    var wechatEnabled: Boolean
+        get() = sp.getBoolean(K_WECHAT, false)
+        set(v) = sp.edit().putBoolean(K_WECHAT, v).apply()
     // ------------------------------------------------------------- helpers
 
     /** Reply route key, falling back to the judge key. */
@@ -304,6 +315,8 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         private const val K_BUBBLE_X = "bubble_x"
         private const val K_AUTO = "auto_analyze"
         private const val K_BILINGUAL = "bilingual_mode"
+        private const val K_ABOUT_ME = "about_me"
+        private const val K_WECHAT = "wechat_enabled"
         private const val K_BILINGUAL_LANG = "bilingual_lang"
         const val DEFAULT_BILINGUAL_LANG = "德语"
 

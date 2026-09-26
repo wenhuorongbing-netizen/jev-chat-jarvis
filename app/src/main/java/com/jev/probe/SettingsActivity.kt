@@ -1,5 +1,6 @@
 package com.jev.probe
 
+import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -15,7 +16,6 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.view.animation.OvershootInterpolator
 import android.widget.EditText
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
@@ -24,6 +24,7 @@ import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.widget.doAfterTextChanged
 import com.jev.probe.core.ChatSnapshot
 import com.jev.probe.core.Msg
 import com.jev.probe.core.Prefs
@@ -55,7 +56,7 @@ class SettingsActivity : AppCompatActivity() {
     private val sub by lazy { color(pal.sub) }
     private val pillOff by lazy { color(pal.card) }
 
-    /** Selected provider index per card, held so Save can read it back. */
+    /** Selected provider index for the judge card; reads resolve against the typed URL. */
     private var judgeProviderIdx = 0
 
     private fun dp(v: Int) = TypedValue.applyDimension(
@@ -80,12 +81,13 @@ class SettingsActivity : AppCompatActivity() {
         root.addView(header("设置"))
 
         // =================== 关于我 ===================
-        // SPEC A5：第一屏第一张业务卡（标题栏/说明除外）。保存在底部统一进行。
+        // SPEC A5：第一屏第一张业务卡（标题栏/说明除外）。即改即存，无保存按钮。
         val aboutMeCard = card()
         aboutMeCard.addView(label("关于我（回复会照这个人的口吻写）"))
         val aboutEdit = edit(prefs.aboutMe, "例：在德国生活的中国人，做什么工作，说话随意简短，不爱用表情，德语什么水平").apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE; minLines = 2
         }
+        aboutEdit.saveDebounced { prefs.aboutMe = it }
         aboutMeCard.addView(aboutEdit)
         aboutMeCard.addView(text("另外会自动学你真实发出去的消息（长度、语气、标点），只存在手机本地。", 11f, sub))
         root.addView(aboutMeCard)
@@ -93,14 +95,14 @@ class SettingsActivity : AppCompatActivity() {
         // =================== 接口 ===================
         root.addView(section("接口"))
 
-        // §4-2/4-3：回复接口卡排第一；判断卡与视觉卡装进「高级」折叠容器。
-        // 容器先建好，判断/视觉卡的构建代码原样保留，只是 addView 目标换成它。
+        // §4-2/4-3：回复接口卡排第一；判断卡、识图卡、上下文装进「高级」折叠容器。
+        // 容器先建好，各卡的构建代码原样保留，只是 addView 目标换成它。
         val advancedBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
-        // --- 判断接口（Jev） ---
+        // --- 判断接口（旧模式） ---
         val judgeCard = card()
-        judgeCard.addView(cardTitle("判断接口（Jev）"))
-        judgeCard.addView(text("读对方消息、给意图判断和候选排序。只有关掉「智能回复」时才需要。", 12f, sub))
+        judgeCard.addView(cardTitle("判断接口（旧模式）"))
+        judgeCard.addView(text("读对方消息、给意图判断和候选排序。只有关掉「翻译模式」时才需要。", 12f, sub))
 
         val judgeBaseEdit = edit(prefs.judgeBaseUrl, Prefs.DEFAULT_JUDGE_BASE_OPENROUTER)
         val judgeModelEdit = edit(prefs.judgeModel, Prefs.DEFAULT_JUDGE_MODEL_OPENROUTER)
@@ -113,6 +115,30 @@ class SettingsActivity : AppCompatActivity() {
             Prefs.PROVIDER_CUSTOM -> 5
             else -> 0
         }
+
+        // Address wins over the pill: a preset HOST in the box means that
+        // preset's provider (and so its path), whatever the pill last said.
+        fun saveJudge() {
+            val judgeBaseTyped = judgeBaseEdit.text.toString().trim()
+            val judgeProv = resolveJudgeProvider(judgeProviderIdx, judgeBaseTyped)
+            val judgeModelTyped = judgeModelEdit.text.toString().trim()
+            prefs.judgeProvider = judgeProv
+            // Blank falls back to THIS provider's preset — never OpenRouter's by
+            // default. Custom is left exactly as typed (blank included): guessing
+            // a URL for it would silently point somewhere the user did not choose.
+            prefs.judgeBaseUrl = when {
+                judgeBaseTyped.isNotBlank() -> judgeBaseTyped
+                judgeProv == Prefs.PROVIDER_CUSTOM -> ""
+                else -> defaultJudgeBase(judgeProv)
+            }
+            prefs.judgeKey = judgeKeyEdit.text.toString()
+            prefs.judgeModel = when {
+                judgeModelTyped.isNotBlank() -> judgeModelTyped
+                judgeProv == Prefs.PROVIDER_CUSTOM -> ""
+                else -> defaultJudgeModel(judgeProv)
+            }
+        }
+
         // Bocha promo block — official address + one-tap copy (limited-time free).
         // Shown ONLY when Bocha Jev is the selected provider; picking any other
         // provider hides it. It used to be added unconditionally, which made every
@@ -172,16 +198,20 @@ class SettingsActivity : AppCompatActivity() {
                 5 -> judgeBaseEdit.setText(expandJudgeUrl(judgeBaseEdit.text.toString()))
             }
             bochaBox.visibility = if (idx == 1) View.VISIBLE else View.GONE
+            saveJudge()   // 即改即存：胶囊点击立即落盘
         })
         judgeCard.addView(label("Base URL"))
+        judgeBaseEdit.saveDebounced { saveJudge() }
         judgeCard.addView(judgeBaseEdit)
-        judgeCard.addView(text("OpenRouter 拼 /alpha/decisions；博查 Jev / TypeSafe / Vercel / OpenCode Zen 拼 /v1/systemone；自定义按原样 POST。Vercel 用 AI Gateway 的密钥，OpenCode Zen 用 Zen 的密钥。",
-            11f, sub))
         judgeCard.addView(bochaBox)
         judgeCard.addView(label("密钥"))
-        judgeCard.addView(edit(prefs.judgeKey, "sk-...", password = true).also { judgeKeyEdit = it })
+        judgeCard.addView(edit(prefs.judgeKey, "sk-...", password = true).also {
+            judgeKeyEdit = it
+            it.saveDebounced { saveJudge() }
+        })
         judgeCard.addView(pasteBtn(judgeKeyEdit))
         judgeCard.addView(label("模型"))
+        judgeModelEdit.saveDebounced { saveJudge() }
         judgeCard.addView(judgeModelEdit)
         val judgeResult = resultText()
         judgeCard.addView(cardBtn("测试判断") {
@@ -215,8 +245,7 @@ class SettingsActivity : AppCompatActivity() {
                 val ms = System.currentTimeMillis() - t0
                 main.post {
                     judgeResult.text = if (a.error != null) "失败（${ms}ms）：${a.error}"
-                    else "成功 ${ms}ms · 意图=${a.trueIntent?.choice ?: "?"}" +
-                        "（置信 ${pct(a.trueIntent?.confidence)}）"
+                    else "成功 · ${ms}ms"
                 }
             }
         })
@@ -230,6 +259,13 @@ class SettingsActivity : AppCompatActivity() {
 
         val replyBaseEdit = edit(prefs.replyBaseUrl, Prefs.DEFAULT_REPLY_BASE)
         val replyModelEdit = edit(prefs.replyModel, Prefs.DEFAULT_REPLY_MODEL)
+
+        fun saveReply() {
+            prefs.replyBaseUrl = replyBaseEdit.text.toString().trim().ifBlank { Prefs.DEFAULT_REPLY_BASE }
+            prefs.replyKey = replyKeyEdit.text.toString()
+            prefs.replyModel = replyModelEdit.text.toString().trim().ifBlank { Prefs.DEFAULT_REPLY_MODEL }
+        }
+
         val replyIdx = when (prefs.replyBaseUrl.trim().trimEnd('/')) {
             Prefs.DEFAULT_REPLY_BASE -> 0
             Prefs.DEEPSEEK_BASE -> 1
@@ -243,13 +279,19 @@ class SettingsActivity : AppCompatActivity() {
                 1 -> { replyBaseEdit.setText(Prefs.DEEPSEEK_BASE); replyModelEdit.setText(Prefs.DEEPSEEK_MODEL) }
                 2 -> { replyBaseEdit.setText(Prefs.DASHSCOPE_BASE); replyModelEdit.setText(Prefs.DASHSCOPE_MODEL) }
             }
+            saveReply()   // 即改即存
         })
         replyCard.addView(label("Base URL"))
+        replyBaseEdit.saveDebounced { saveReply() }
         replyCard.addView(replyBaseEdit)
         replyCard.addView(label("密钥"))
-        replyCard.addView(edit(prefs.replyKey, "留空则用判断接口密钥", password = true).also { replyKeyEdit = it })
+        replyCard.addView(edit(prefs.replyKey, "留空则用判断接口密钥", password = true).also {
+            replyKeyEdit = it
+            it.saveDebounced { saveReply() }
+        })
         replyCard.addView(pasteBtn(replyKeyEdit))
         replyCard.addView(label("模型"))
+        replyModelEdit.saveDebounced { saveReply() }
         replyCard.addView(replyModelEdit)
         val replyResult = resultText()
         replyCard.addView(cardBtn("测试回复") {
@@ -272,20 +314,27 @@ class SettingsActivity : AppCompatActivity() {
                 val ms = System.currentTimeMillis() - t0
                 main.post {
                     replyResult.text = if (err != null) "失败（${ms}ms）：$err"
-                    else "成功 ${ms}ms · 返回：${out.replace("\n", " ").take(60)}"
+                    else "成功 ${ms}ms · ${out.replace("\n", " ").take(60)}"
                 }
             }
         })
         replyCard.addView(replyResult)
         root.addView(replyCard)
 
-        // --- 视觉接口 ---
+        // --- 识图接口 ---
         val visionCard = card()
-        visionCard.addView(cardTitle("视觉接口（OCR 用，可先不填）"))
-        visionCard.addView(text("读不到控件树的 App 走截图识别。B 阶段才用到，现在填不填都不影响。", 12f, sub))
+        visionCard.addView(cardTitle("识图接口（截图识别用，一般不用填）"))
+        visionCard.addView(text("读不到控件文字的 App 会走截图识别。", 12f, sub))
 
         val visionBaseEdit = edit(prefs.visionBaseUrl, Prefs.DEFAULT_VISION_BASE)
         val visionModelEdit = edit(prefs.visionModel, Prefs.DEFAULT_VISION_MODEL)
+
+        fun saveVision() {
+            prefs.visionBaseUrl = visionBaseEdit.text.toString().trim()
+            prefs.visionKey = visionKeyEdit.text.toString()
+            prefs.visionModel = visionModelEdit.text.toString().trim().ifBlank { Prefs.DEFAULT_VISION_MODEL }
+        }
+
         val visionIdx = when (prefs.visionBaseUrl.trim().trimEnd('/')) {
             Prefs.DEFAULT_VISION_BASE -> 0
             Prefs.DASHSCOPE_BASE -> 1
@@ -297,13 +346,19 @@ class SettingsActivity : AppCompatActivity() {
                 0 -> { visionBaseEdit.setText(Prefs.DEFAULT_VISION_BASE); visionModelEdit.setText(Prefs.DEFAULT_VISION_MODEL) }
                 1 -> { visionBaseEdit.setText(Prefs.DASHSCOPE_BASE); visionModelEdit.setText(Prefs.DASHSCOPE_VISION_MODEL) }
             }
+            saveVision()   // 即改即存
         })
         visionCard.addView(label("Base URL"))
+        visionBaseEdit.saveDebounced { saveVision() }
         visionCard.addView(visionBaseEdit)
         visionCard.addView(label("密钥"))
-        visionCard.addView(edit(prefs.visionKey, "留空则用回复接口密钥", password = true).also { visionKeyEdit = it })
+        visionCard.addView(edit(prefs.visionKey, "留空则用回复接口密钥", password = true).also {
+            visionKeyEdit = it
+            it.saveDebounced { saveVision() }
+        })
         visionCard.addView(pasteBtn(visionKeyEdit))
         visionCard.addView(label("模型"))
+        visionModelEdit.saveDebounced { saveVision() }
         visionCard.addView(visionModelEdit)
         val visionResult = resultText()
         visionCard.addView(cardBtn("测试视觉") {
@@ -331,12 +386,29 @@ class SettingsActivity : AppCompatActivity() {
                 val ms = System.currentTimeMillis() - t0
                 main.post {
                     visionResult.text = if (err != null) "失败（${ms}ms）：$err"
-                    else "成功 ${ms}ms · 返回：${out.replace("\n", " ").take(60)}"
+                    else "成功 ${ms}ms · ${out.replace("\n", " ").take(60)}"
                 }
             }
         })
         visionCard.addView(visionResult)
         advancedBox.addView(visionCard)
+
+        // --- 上下文（记录聊天历史 + 条数），随识图卡一起沉进「高级」 ---
+        val ctxCard = card()
+        val ctxRow = toggleRow("记录聊天历史（只存本机，用于关联上下文）", prefs.contextEnabled) { on ->
+            prefs.contextEnabled = on
+        }
+        ctxCard.addView(ctxRow)
+        ctxCard.addView(text("关闭时不写任何聊天内容到磁盘；笔记与联系人匹配仍然照常工作。", 11f, sub))
+        ctxCard.addView(label("上下文条数"))
+        val ctxCountEdit = edit(prefs.contextHistoryCount.toString(), "30").apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+        }
+        ctxCountEdit.saveDebounced { v ->
+            prefs.contextHistoryCount = v.trim().toIntOrNull()?.coerceIn(0, 100) ?: 30
+        }
+        ctxCard.addView(ctxCountEdit)
+        advancedBox.addView(ctxCard)
 
         // --- 「高级」折叠条：点击只切 visibility，容器与卡内状态不重建、不丢失 ---
         var advancedFolded = OverlayRules.foldAdvancedByDefault(prefs.bilingualMode)
@@ -360,7 +432,7 @@ class SettingsActivity : AppCompatActivity() {
             }
             setOnClickListener { setAdvancedFolded(!advancedFolded) }
         }
-        foldBar.addView(text("高级：判断接口 · 识图接口", 13f, sub, bold = true).apply {
+        foldBar.addView(text("高级：判断接口 · 识图 · 上下文", 13f, sub, bold = true).apply {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         })
         foldBar.addView(foldArrow)
@@ -371,46 +443,51 @@ class SettingsActivity : AppCompatActivity() {
         // =================== 分析 ===================
         root.addView(section("分析"))
         val card2 = card()
-        // 「关于我」已上移到第一屏独立成卡（SPEC A5），本卡从关系描述开始。
-        card2.addView(label("关系描述（给 Jev 判断用）"))
+        // 「关于我」已上移到第一屏独立成卡（SPEC A5），本卡从关系开始。
+        card2.addView(label("关系（回复会参考）"))
         val relEdit = edit(prefs.relationship, Prefs.DEFAULT_REL)
+        relEdit.saveDebounced { prefs.relationship = it }   // blank stays blank, on purpose
         card2.addView(relEdit)
         card2.addView(label("会话白名单（每行一个关键词，空=所有会话）"))
         val wlEdit = edit(prefs.whitelist.joinToString("\n"), "留空则对所有会话生效").apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE; minLines = 2
         }
+        wlEdit.saveDebounced { v ->
+            prefs.whitelist = v.split("\n").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+        }
         card2.addView(wlEdit)
-        val autoRow = toggleRow("新消息自动在后台生成（气泡变绿，点开即看）", prefs.autoAnalyze)
+        val autoRow = toggleRow("新消息自动在后台生成（气泡亮起，点开即看）", prefs.autoAnalyze) { on ->
+            prefs.autoAnalyze = on
+        }
         card2.addView(autoRow)
-        val wechatRow = toggleRow("微信（实验）", prefs.wechatEnabled)
+        val wechatRow = toggleRow("微信（实验）", prefs.wechatEnabled) { on ->
+            prefs.wechatEnabled = on
+        }
         card2.addView(wechatRow)
         card2.addView(text("新版微信对读屏服务隐藏了消息文字，部分设备还禁止截屏，可能读不到。", 11f, sub))
 
-        // --- 双语模式 ---
-        // §4-3：开关切换时同步高级容器折叠（开→折叠，关→展开），只改 visibility，不改 prefs。
-        val bilingualRow = toggleRow("智能回复（跟随对方语言，不用 Jev）", prefs.bilingualMode) { on ->
+        // --- 翻译模式 ---
+        // §4-3：开关切换时同步高级容器折叠（开→折叠，关→展开），只改 visibility。
+        val bilingualRow = toggleRow("翻译模式：外语翻成中文，用对方语言回", prefs.bilingualMode) { on ->
+            prefs.bilingualMode = on
             setAdvancedFolded(on)
         }
         card2.addView(bilingualRow)
-        card2.addView(text("只用「回复接口」一把密钥：对方说中文就中文回；说外语就翻成中文给你看，3 条回复用对方的语言写并附中文意思，填入只填外语。", 11f, sub))
+        card2.addView(text("只用回复接口一把密钥。对方说中文就中文回；说外语就翻成中文给你看，回复附中文意思，填入只填外语。", 11f, sub))
 
-        // --- OCR 兜底（B 阶段）---
-        val ocrFallbackRow = toggleRow("树读不到正文时用 OCR 兜底", prefs.ocrFallback)
+        // --- 截图识别兜底 ---
+        val ocrFallbackRow = toggleRow("读不到文字时用截图识别", prefs.ocrFallback) { on ->
+            prefs.ocrFallback = on
+        }
         card2.addView(ocrFallbackRow)
-        card2.addView(text("飞书正文是画上去的，节点树里读不到，这时截一次屏本地识别（不上传）。", 11f, sub))
-        val ocrAutoRow = toggleRow("OCR 模式自动分析", prefs.ocrAutoAnalyze)
+        card2.addView(text("飞书的消息文字读不出来，这时截一次屏在本地识别，不上传。", 11f, sub))
+        val ocrAutoRow = toggleRow("OCR 模式自动分析", prefs.ocrAutoAnalyze) { on ->
+            prefs.ocrAutoAnalyze = on
+        }
         card2.addView(ocrAutoRow)
         card2.addView(text("关闭时 OCR 认完只亮悬浮球，点一下再分析。", 11f, sub))
 
-        // --- 知识库 / 关联上下文（D 阶段） ---
-        val ctxRow = toggleRow("记录聊天历史（只存本机，用于关联上下文）", prefs.contextEnabled)
-        card2.addView(ctxRow)
-        card2.addView(text("关闭时不写任何聊天内容到磁盘；笔记与联系人匹配仍然照常工作。", 11f, sub))
-        card2.addView(label("注入最近历史条数（0–100）"))
-        val ctxCountEdit = edit(prefs.contextHistoryCount.toString(), "30").apply {
-            inputType = InputType.TYPE_CLASS_NUMBER
-        }
-        card2.addView(ctxCountEdit)
+        // --- 知识库 ---
         card2.addView(cardBtn("知识库与联系人") {
             startActivity(android.content.Intent(this, KnowledgeActivity::class.java))
         })
@@ -428,18 +505,6 @@ class SettingsActivity : AppCompatActivity() {
                 .setNegativeButton("取消", null)
                 .show()
         })
-        // Deliberately low-key: a developer aid, not a user feature.
-        card2.addView(text("自检", 12f, sub).apply {
-            setPadding(dp(4), dp(12), dp(8), dp(4))
-            setOnClickListener {
-                kbResult.text = "自检中…"
-                worker.execute {
-                    val out = try { KbSelfCheck.run(this@SettingsActivity) }
-                    catch (e: Exception) { "自检异常：${e.javaClass.simpleName} ${e.message ?: ""}" }
-                    main.post { kbResult.text = out }
-                }
-            }
-        })
         card2.addView(kbResult)
         root.addView(card2)
 
@@ -451,12 +516,17 @@ class SettingsActivity : AppCompatActivity() {
         card3.addView(text("越低越透，越能看清下面的聊天", 12f, sub))
         val seek = SeekBar(this).apply {
             max = 40; progress = prefs.overlayOpacity - 60  // 60..100
+            progressTintList = ColorStateList.valueOf(accent)
+            thumbTintList = ColorStateList.valueOf(accent)
+            progressBackgroundTintList = ColorStateList.valueOf(color(pal.accentSoft))
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(sb: SeekBar?, p: Int, u: Boolean) {
                     opacityLabel.text = "悬浮窗不透明度：${p + 60}%"
                 }
                 override fun onStartTrackingTouch(sb: SeekBar?) {}
-                override fun onStopTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {
+                    prefs.overlayOpacity = (sb?.progress ?: 0) + 60   // 松手即存
+                }
             })
         }
         card3.addView(seek)
@@ -471,53 +541,28 @@ class SettingsActivity : AppCompatActivity() {
         aboutCard.addView(cardBtn("隐私政策") { openUrl(PRIVACY_URL) })
         aboutCard.addView(cardBtn("开源仓库") { openUrl(REPO_URL) })
         aboutCard.addView(text(versionLabel(), 11f, sub).apply { setPadding(0, dp(12), 0, dp(4)) })
+        // Deliberately low-key: a developer aid, not a user feature.
+        val selfCheckResult = resultText()
+        aboutCard.addView(text("自检", 12f, sub).apply {
+            setPadding(dp(4), dp(12), dp(8), dp(4))
+            setOnClickListener {
+                selfCheckResult.text = "自检中…"
+                worker.execute {
+                    val out = try { KbSelfCheck.run(this@SettingsActivity) }
+                    catch (e: Exception) { "自检异常：${e.javaClass.simpleName} ${e.message ?: ""}" }
+                    main.post { selfCheckResult.text = out }
+                }
+            }
+        })
+        aboutCard.addView(selfCheckResult)
         root.addView(aboutCard)
 
-        // =================== 保存 ===================
-        root.addView(primaryBtn("保存全部设置") {
-            // Address wins over the pill: a preset HOST in the box means that
-            // preset's provider (and so its path), whatever the pill last said.
-            val judgeBaseTyped = judgeBaseEdit.text.toString().trim()
-            val judgeProv = resolveJudgeProvider(judgeProviderIdx, judgeBaseTyped)
-            val judgeModelTyped = judgeModelEdit.text.toString().trim()
-            prefs.judgeProvider = judgeProv
-            // Blank falls back to THIS provider's preset — never OpenRouter's by
-            // default. Custom is left exactly as typed (blank included): guessing
-            // a URL for it would silently point somewhere the user did not choose.
-            prefs.judgeBaseUrl = when {
-                judgeBaseTyped.isNotBlank() -> judgeBaseTyped
-                judgeProv == Prefs.PROVIDER_CUSTOM -> ""
-                else -> defaultJudgeBase(judgeProv)
-            }
-            prefs.judgeKey = judgeKeyEdit.text.toString()
-            prefs.judgeModel = when {
-                judgeModelTyped.isNotBlank() -> judgeModelTyped
-                judgeProv == Prefs.PROVIDER_CUSTOM -> ""
-                else -> defaultJudgeModel(judgeProv)
-            }
-
-            prefs.replyBaseUrl = replyBaseEdit.text.toString().trim().ifBlank { Prefs.DEFAULT_REPLY_BASE }
-            prefs.replyKey = replyKeyEdit.text.toString()
-            prefs.replyModel = replyModelEdit.text.toString().trim().ifBlank { Prefs.DEFAULT_REPLY_MODEL }
-
-            prefs.visionBaseUrl = visionBaseEdit.text.toString().trim()
-            prefs.visionKey = visionKeyEdit.text.toString()
-            prefs.visionModel = visionModelEdit.text.toString().trim().ifBlank { Prefs.DEFAULT_VISION_MODEL }
-
-            prefs.relationship = relEdit.text.toString()   // blank stays blank, on purpose
-            prefs.whitelist = wlEdit.text.toString().split("\n")
-                .map { it.trim() }.filter { it.isNotEmpty() }.toSet()
-            prefs.autoAnalyze = (autoRow.tag as? Boolean) ?: true
-            prefs.wechatEnabled = (wechatRow.tag as? Boolean) ?: false
-            prefs.aboutMe = aboutEdit.text.toString()
-            prefs.bilingualMode = (bilingualRow.tag as? Boolean) ?: false
-            prefs.ocrFallback = (ocrFallbackRow.tag as? Boolean) ?: true
-            prefs.ocrAutoAnalyze = (ocrAutoRow.tag as? Boolean) ?: false
-            prefs.contextEnabled = (ctxRow.tag as? Boolean) ?: false
-            prefs.contextHistoryCount =
-                ctxCountEdit.text.toString().trim().toIntOrNull()?.coerceIn(0, 100) ?: 30
-            prefs.overlayOpacity = seek.progress + 60
-            Toast.makeText(this, "已保存", Toast.LENGTH_SHORT).show()
+        // 即改即存：没有保存按钮，留一行小字说明。
+        root.addView(text("改动即保存", 11f, sub).apply {
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                .apply { topMargin = dp(20) }
         })
 
         setContentView(scroll)
@@ -527,6 +572,18 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var judgeKeyEdit: EditText
     private lateinit var replyKeyEdit: EditText
     private lateinit var visionKeyEdit: EditText
+
+    /** 即改即存：停止输入 400ms 后落盘；连续输入只记最后一版。 */
+    private fun EditText.saveDebounced(save: (String) -> Unit) {
+        var pending: Runnable? = null
+        doAfterTextChanged { editable ->
+            val v = editable?.toString() ?: ""
+            pending?.let { main.removeCallbacks(it) }
+            val r = Runnable { save(v) }
+            pending = r
+            main.postDelayed(r, 400L)
+        }
+    }
 
     private fun providerOf(idx: Int) = when (idx) {
         1 -> Prefs.PROVIDER_BOCHA
@@ -617,9 +674,6 @@ class SettingsActivity : AppCompatActivity() {
         return VisionClient.encodeJpeg(bmp)
     }
 
-    private fun pct(d: Double?): String =
-        if (d == null) "?" else "${(d * 100).roundToInt()}%"
-
     /** Horizontal selectable pills; calls [onPick] with the chosen index. */
     private fun pills(options: List<String>, initial: Int, onPick: (Int) -> Unit): View {
         val row = LinearLayout(this).apply {
@@ -644,6 +698,7 @@ class SettingsActivity : AppCompatActivity() {
         views.forEachIndexed { j, v -> paintPill(v, j == initial) }
         val scroller = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
+            setHorizontalFadingEdgeEnabled(true)
             addView(row)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -684,7 +739,7 @@ class SettingsActivity : AppCompatActivity() {
             sw.text = if (now) "开" else "关"
             sw.setTextColor(if (now) Color.WHITE else sub)
             sw.background = if (now) accentGradientBg(10) else round(dp(10), color(pal.card))
-            onToggle?.invoke(now)
+            onToggle?.invoke(now)   // 即改即存：点击时立即写 prefs
         }
         row.addView(lab); row.addView(sw)
         return row
@@ -728,7 +783,7 @@ class SettingsActivity : AppCompatActivity() {
                 Toast.makeText(this@SettingsActivity, "剪贴板是空的", Toast.LENGTH_SHORT).show()
             } else {
                 target.setText(clip)
-                Toast.makeText(this@SettingsActivity, "已粘贴（${clip.length} 位），记得保存", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@SettingsActivity, "已粘贴（${clip.length} 位）", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -748,17 +803,6 @@ class SettingsActivity : AppCompatActivity() {
         text = t; textSize = size; setTextColor(color); if (bold) setTypeface(typeface, Typeface.BOLD)
     }
 
-    private fun primaryBtn(label: String, onClick: () -> Unit) = TextView(this).apply {
-        text = label; textSize = 15f; gravity = Gravity.CENTER; setTypeface(typeface, Typeface.BOLD)
-        // v2.1：主按钮改 accentLight → accent 渐变，圆角不变；按压回弹见 pressBounce。
-        setTextColor(Color.WHITE); background = accentGradientBg(12)
-        setPadding(dp(16), dp(12), dp(16), dp(12))
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(20) }
-        pressBounce()
-        setOnClickListener { onClick() }
-    }
-
     /** Outlined button sized for inside a card. */
     private fun cardBtn(label: String, onClick: () -> Unit) = TextView(this).apply {
         text = label; textSize = 14f; gravity = Gravity.CENTER; setTypeface(typeface, Typeface.BOLD)
@@ -774,20 +818,6 @@ class SettingsActivity : AppCompatActivity() {
         GradientDrawable.Orientation.TL_BR,
         UiTokens.accentGradient(pal).map { color(it) }.toIntArray()
     ).apply { cornerRadius = dp(radiusDp).toFloat() }
-
-    /** v2.2 按压反馈：按下 scale 0.98（100ms），松开 Overshoot 回弹（250ms）；返回 false 不吞 click。 */
-    private fun View.pressBounce() {
-        setOnTouchListener { v, ev ->
-            when (ev.action) {
-                MotionEvent.ACTION_DOWN -> v.animate()
-                    .scaleX(0.98f).scaleY(0.98f).setDuration(UiTokens.DUR_MICRO).start()
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.animate()
-                    .scaleX(1f).scaleY(1f).setDuration(250L)
-                    .setInterpolator(OvershootInterpolator(2f)).start()
-            }
-            false
-        }
-    }
 
     private fun round(radius: Int, color: Int, stroke: Boolean = false) = GradientDrawable().apply {
         cornerRadius = radius.toFloat(); setColor(color); if (stroke) setStroke(dp(1), accent)

@@ -1,10 +1,12 @@
 package com.jev.probe
 
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.util.TypedValue
@@ -57,6 +59,14 @@ class MainActivity : AppCompatActivity() {
         prefs = Prefs(this)
         window.decorView.setBackgroundColor(color(pal.canvas))
 
+        // API 33+ 通知权限：用于掉权限/掉线提醒；结果回调无需处理。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(
+                arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIFICATIONS)
+        }
+
         val scroll = ScrollView(this)
         container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -76,7 +86,7 @@ class MainActivity : AppCompatActivity() {
         container.removeAllViews()
 
         container.addView(text("Jev 聊天助手", 24f, ink, bold = true))
-        container.addView(text("在聊天 App 旁读对方消息（已支持 QQ、X、飞书），给出判断和候选回复。发送始终由你手动点。",
+        container.addView(text("贴在 WhatsApp / QQ / X / 飞书旁：读出对方新消息，外语翻成中文，给 3 条候选回复。只填入输入框，发送由你点。",
             13f, sub).apply { setPadding(0, dp(8), 0, dp(16)) })
 
         val a11y = isA11yEnabled()
@@ -90,13 +100,13 @@ class MainActivity : AppCompatActivity() {
 
         // Permission checklist
         container.addView(sectionLabel("权限设置"))
-        container.addView(permCard("无障碍权限", "读取当前聊天窗口的消息文字", a11y) {
+        container.addView(permCard("无障碍权限", "读取当前聊天窗口的消息文字（在列表里找到『Jev助手』）", a11y) {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         })
         container.addView(permCard("悬浮窗权限", "在聊天窗口上方显示分析卡片", overlay) {
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
         })
-        container.addView(permCard("自启动 + 省电无限制", "小米/HyperOS 必做，否则服务被冻结、读不到消息", null) {
+        container.addView(permCard("自启动 + 省电无限制", "小米/HyperOS 必做，否则服务被冻结。设过一次即可，这里检测不到，不用重复点。", null) {
             runCatching {
                 startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
             }
@@ -130,12 +140,6 @@ class MainActivity : AppCompatActivity() {
         c.addView(checkLine("无障碍", a11y))
         c.addView(checkLine("悬浮窗", overlay))
         c.addView(checkLine("密钥", key, okWord = "已设", noWord = "未设"))
-        // History recording is opt-in (off by default). Mention it here, never block on it.
-        if (!prefs.contextEnabled) {
-            c.addView(text("关联上下文未开启，可在设置里开启", 12f, sub).apply {
-                setPadding(0, dp(8), 0, 0)
-            })
-        }
         return c
     }
 
@@ -177,7 +181,8 @@ class MainActivity : AppCompatActivity() {
         left.addView(text(desc, 12f, sub).apply { setPadding(0, dp(4), 0, 0) })
         if (granted == true) left.addView(text("✓ 已开启", 12f, green, bold = true).apply { setPadding(0, dp(4), 0, 0) })
         row.addView(left)
-        row.addView(btn(if (granted == true) "已开启" else "去开启", granted != true, onClick))
+        // granted==true 时右侧不再放「已开启」灰按钮，只保留左侧绿字。
+        if (granted != true) row.addView(btn("去开启", true, onClick))
         c.addView(row)
         return c
     }
@@ -287,5 +292,6 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val PRIVACY_URL = "https://chatjevs.com/privacy.html"
+        private const val REQ_NOTIFICATIONS = 41
     }
 }

@@ -42,7 +42,12 @@ class JudgeClient(private val prefs: Prefs) {
                 latencyMs = System.currentTimeMillis() - start
             )
         } catch (e: Exception) {
-            Log.w(TAG, "judge failed: ${e.message}")
+            // Never log e.message: ApiException's message embeds the server
+            // response body (first 120 chars), which may echo request content.
+            // Status + length is all logcat gets; the panel still shows the
+            // full message to the user.
+            val api = e as? ApiException
+            Log.w(TAG, "judge failed: ${e.javaClass.simpleName} status=${api?.status} msg.len=${e.message?.length ?: 0}")
             Analysis(null, null, null, null, null, null, null, emptyList(),
                 System.currentTimeMillis() - start, error = e.message ?: "判断接口请求失败")
         }

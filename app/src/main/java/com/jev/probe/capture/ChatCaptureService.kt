@@ -13,6 +13,8 @@ import com.jev.probe.capture.ocr.MlKitOcr
 import com.jev.probe.capture.ocr.OcrLine
 import com.jev.probe.capture.ocr.ScreenCapture
 import com.jev.probe.core.BubbleRect
+import com.jev.probe.core.BilingualResult
+import com.jev.probe.core.ChatMemory
 import com.jev.probe.core.ChatSnapshot
 import com.jev.probe.core.Msg
 import com.jev.probe.core.Prefs
@@ -70,6 +72,9 @@ open class ChatCaptureService : AccessibilityService() {
      *  next real title for that package simply replaces it. */
     private val lastGoodTitle: MutableMap<String, String> = HashMap()
     private val debounce = Runnable { runAnalysis() }
+    /** Trailing debounce for the high-frequency content/scrolled event stream:
+     *  one capture pass per burst, not one per event. */
+    private val captureDebounce = Runnable { maybeCapture() }
     private var pendingSnapshot: ChatSnapshot? = null
     @Volatile private var currentSnapshot: ChatSnapshot? = null
     private var foregroundPkg: String? = null
@@ -153,23 +158,29 @@ open class ChatCaptureService : AccessibilityService() {
             // WeChat is fully disabled: never read/screenshot/OCR/fill here, only
             // show the one-time "not supported" notice and stop. Checked before the
             // generic no-adapter branch because WeChat is no longer in `adapters`.
-            if (fg == PKG_WECHAT) { foregroundPkg = fg; showWeChatDisabled(auto = true); return }
-            if (fg != null && fg !in adapters) {
+            if (fg == PKG_WECHAT && !prefs.wechatEnabled) { foregroundPkg = fg; showWeChatDisabled(auto = true); return }
+            // Only chat apps we can read get a bubble; everywhere else it would
+            // just be in the way (user feedback: "在哪个app都出现").
+            if (fg != null && adapterFor(fg) == null) {
                 foregroundPkg = fg
                 wechatNoticeShown = false // left WeChat → allow the notice again next visit
-                val drop = fg == packageName ||
-                    fg.contains("launcher", ignoreCase = true) ||
-                    fg == "com.miui.home" ||
-                    fg == "com.android.systemui"
-                main.post { if (drop) overlay?.hide() else overlay?.showIdle(null) }
+                // IME / status bar events can report their own package while the
+                // chat app stays underneath — only a real app switch hides us.
+                if (!fg.contains("inputmethod", true) && fg != "com.android.systemui") main.post { overlay?.hide() }
                 return
             }
         }
 
         when (type) {
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+            // App/window switches stay immediate so the bubble follows at once.
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> maybeCapture()
+            // Content/scrolled events fire in bursts (caret blinks, timestamp
+            // flips, typing): collapse each burst into one trailing capture pass.
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
-            AccessibilityEvent.TYPE_VIEW_SCROLLED -> maybeCapture()
+            AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
+                main.removeCallbacks(captureDebounce)
+                main.postDelayed(captureDebounce, CAPTURE_DEBOUNCE_MS)
+            }
         }
     }
 
@@ -179,18 +190,12 @@ open class ChatCaptureService : AccessibilityService() {
         // WeChat is fully disabled — no tree read, no screenshot, no OCR, no fill.
         // A content-changed / scrolled event in WeChat only re-shows the one-time
         // notice (deduped); it must never reach an adapter or the OCR path.
-        if (pkg == PKG_WECHAT) { showWeChatDisabled(auto = true); return }
-        wechatNoticeShown = false // any other foreground → allow the notice again next WeChat visit
-        // Apps with no adapter are never handled automatically (v1.3 revision):
-        // the only way in for them is the bubble menu's "截屏识别一次".
-        val adapter = adapters[pkg] ?: return
-        // Outside a chat window (the conversation list, a profile, settings…) the
-        // adapter returns null. That is NOT a reason to show nothing: an adapted
-        // app must behave at least as well as an unadapted one, which parks an idle
-        // bubble so the menu stays reachable. Without this, opening QQ / Feishu on
-        // their list screen produced no bubble at all.
+        if (pkg == PKG_WECHAT && !prefs.wechatEnabled) { showWeChatDisabled(auto = true); return }
+        if (pkg != PKG_WECHAT) wechatNoticeShown = false // allow the notice again next WeChat visit
+        val adapter = pkg?.let { adapterFor(it) } ?: return
+        // Outside a chat window (conversation list, profile, settings…): no bubble.
         val rawSnapshot = adapter.extract(root, resources)
-        if (rawSnapshot == null) { main.post { overlay?.showIdle(null) }; return }
+        if (rawSnapshot == null) { main.post { overlay?.hide() }; return }
         // Stabilize the title BEFORE anything below reads it: some apps (X) show
         // a transient "连接中…" title for a moment right after opening a thread.
         val snapshot = stabilizeTitle(pkg ?: "", rawSnapshot)
@@ -231,24 +236,80 @@ open class ChatCaptureService : AccessibilityService() {
         if (sig == lastSignature && showing) return
         // Same content but the bubble is gone (killed by MIUI, or we left and came
         // back) → just put the bubble back, do NOT re-analyze (saves tokens/time).
-        if (sig == lastSignature && !showing) { main.post { overlay?.showIdle(snapshot.title) }; return }
+        if (sig == lastSignature && !showing) {
+            val cached = synchronized(resultCache) { resultCache[memKey(pkg, snapshot.title) + "#" + sig] }
+            main.post {
+                overlay?.showIdle(snapshot.title)
+                cached?.let { overlay?.showBilingual(it) { t -> fillInput(t) } }
+            }
+            return
+        }
         // Anything else reaching here is a genuinely different conversation (new
         // app, or new content in this one) — a leftover judgment/candidates from
         // whatever was shown before must not leak into it.
         main.post { overlay?.resetForNewConversation() }
         lastSignature = sig
-        Log.d(TAG, "snapshot[$pkg] title=${snapshot.title} n=${snapshot.messages.size} " +
+        Log.d(TAG, "snapshot[$pkg] title.len=${snapshot.title?.length ?: 0} n=${snapshot.messages.size} " +
             snapshot.messages.takeLast(6).joinToString(" | ") { "${it.side}:${it.text.length}" }) // sides + lengths only, never content
 
-        // Trigger only when the newest message is from the other person, and only
-        // if auto-analyze is on. Otherwise show the idle bubble (tap to analyze).
-        if (snapshot.latestFrom != "other" || !prefs.autoAnalyze) {
-            main.post { overlay?.showIdle(snapshot.title) }; return
+        // Stitch the visible window onto this chat's local transcript (text only,
+        // no screenshots) so the prompt sees more than one screen of history.
+        // Gated by "记录聊天历史": with the switch off, nothing about the chat
+        // is written to disk at all (P0-A — the write used to run regardless).
+        val key = memKey(pkg, snapshot.title)
+        val bottom = isAtBottom(root)
+        if (prefs.contextEnabled) {
+            submit { runCatching { ChatMemory.get(this).merge(key, snapshot.messages, bottom) } }
+        }
+        pendingSnapshot = snapshot
+
+        // Already generated for exactly this state (came back to the chat) → show it.
+        val cached = synchronized(resultCache) { resultCache[key + "#" + sig] }
+        if (cached != null) {
+            main.post { overlay?.showIdle(snapshot.title); overlay?.showBilingual(cached) { fillInput(it) } }
+            return
         }
 
-        pendingSnapshot = snapshot
+        // Pre-generate in the background only when the other person spoke last and
+        // auto is on; the panel never opens by itself — the bubble turns green.
+        main.post { overlay?.showIdle(snapshot.title) }
+        if (snapshot.latestFrom != "other" || !prefs.autoAnalyze) return
         main.removeCallbacks(debounce)
-        main.postDelayed(debounce, 800) // debounce bursts of content-changed events
+        main.postDelayed(debounce, 1000) // people often send 2-3 messages in a row
+    }
+
+    private fun adapterFor(pkg: String): ChatAppAdapter? =
+        if (pkg == PKG_WECHAT) (if (prefs.wechatEnabled) wechatAdapter else null) else adapters[pkg]
+
+    private val wechatAdapter by lazy { WeChatAdapter() }
+
+    private fun memKey(pkg: String?, title: String?) = (pkg ?: "") + "|" + (title ?: "")
+
+    /** Recent results, so switching away and back does not pay for a new call. */
+    private val resultCache = object : LinkedHashMap<String, BilingualResult>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, BilingualResult>?) = size > 30
+    }
+
+    /**
+     * Whether the message list shows the newest message (cannot scroll further
+     * down). The biggest scrollable node on screen is taken as the message list.
+     */
+    private fun isAtBottom(root: AccessibilityNodeInfo): Boolean {
+        var best: AccessibilityNodeInfo? = null; var bestArea = 0
+        val stack = ArrayDeque<AccessibilityNodeInfo>(); stack.addLast(root)
+        var guard = 0
+        val r = Rect()
+        while (stack.isNotEmpty() && guard++ < 3000) {
+            val n = stack.removeLast()
+            if (n.isScrollable) {
+                n.getBoundsInScreen(r)
+                val area = r.width() * r.height()
+                if (area > bestArea) { bestArea = area; best = n }
+            }
+            for (i in n.childCount - 1 downTo 0) n.getChild(i)?.let { stack.addLast(it) }
+        }
+        val list = best ?: return true
+        return list.actionList.none { it.id == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD }
     }
 
     /**
@@ -263,10 +324,13 @@ open class ChatCaptureService : AccessibilityService() {
     private fun showWeChatDisabled(auto: Boolean) {
         if (auto && wechatNoticeShown) return
         wechatNoticeShown = true
-        // No popup panel in WeChat — a full card is intrusive when others can see
-        // the screen. Take the overlay off WeChat entirely and show the reason
-        // once as a small transient toast.
-        main.post { overlay?.hide(); overlay?.toast(WECHAT_DISABLED_MSG) }
+        // No auto-popup panel in WeChat — a full card opening by itself is
+        // intrusive when others can see the screen. showNotice files the message
+        // on the bubble (the overlay side turns it into a red dot, shown when the
+        // user next opens the panel). Never hide() afterwards: hide() tears down
+        // the overlay root and would take the just-posted notice with it — which
+        // is exactly why the old hide-then-toast order never showed anything.
+        main.post { overlay?.showNotice(WECHAT_DISABLED_MSG) }
     }
 
     /** A placeholder title an app shows only for a moment (e.g. X's "连接中…"
@@ -296,7 +360,7 @@ open class ChatCaptureService : AccessibilityService() {
         if (prefs.bilingualMode) { runBilingual(snapshot); return }
         if (!prefs.hasKey()) { main.post { overlay?.showError("未设置判断接口密钥，去设置里填") }; return }
         analyzing = true
-        main.post { overlay?.showLoading(); overlay?.setNote(snapshot.note) }
+        main.post { overlay?.showLoading(open = true); overlay?.setNote(snapshot.note) }
         val client = JevClient(prefs)
         val rel = prefs.relationship
         val pkg = activePkg ?: ""
@@ -345,25 +409,53 @@ open class ChatCaptureService : AccessibilityService() {
         main.post { overlay?.showLoading(); overlay?.setNote(snapshot.note) }
         val rel = prefs.relationship
         val pkg = activePkg ?: ""
+        val key = memKey(pkg, snapshot.title)
+        val sig = snapshot.signature()
+        val started = System.currentTimeMillis()
         submit {
             val ctx = try {
                 ContextBuilder.build(this, snapshot, pkg, prefs)
             } catch (e: Exception) {
                 Log.w(TAG, "context build failed: ${e.javaClass.simpleName}"); null
             }
+            // The same switch gates the read/inject side: with "记录聊天历史"
+            // off, no stitched transcript or style samples go into the prompt —
+            // the model sees only what is on screen right now.
+            val transcript: List<Msg>
+            val style: List<String>
+            if (prefs.contextEnabled) {
+                val mem = ChatMemory.get(this)
+                transcript = runCatching { mem.merge(key, snapshot.messages, true) }.getOrDefault(snapshot.messages)
+                style = runCatching { mem.styleSamples(STYLE_SAMPLES) }.getOrDefault(emptyList())
+            } else {
+                transcript = snapshot.messages
+                style = emptyList()
+            }
             main.post { overlay?.setContextInfo(ctx?.notes?.size ?: 0, ctx?.history?.size ?: 0) }
             val result = try {
-                ReplyClient(prefs).draftBilingual(snapshot, rel, ctx)
+                ReplyClient(prefs).draftBilingual(snapshot, rel, ctx, transcript, style)
             } catch (e: Exception) {
-                main.post { analyzing = false; overlay?.showError(e.message ?: e.javaClass.simpleName) }
+                main.post { analyzing = false; if (isCurrent(key)) overlay?.showError(e.message ?: e.javaClass.simpleName) }
                 return@submit
             }
+            Log.i(TAG, "bilingual: ${System.currentTimeMillis() - started}ms transcript=${transcript.size} style=${style.size}")
+            synchronized(resultCache) { resultCache["$key#$sig"] = result }
             main.post {
                 analyzing = false
-                overlay?.showBilingual(result) { text -> fillInput(text) }
+                // The user may have left this chat while we were generating: keep the
+                // result in the cache, but never pop it up over a different chat.
+                if (isCurrent(key)) overlay?.showBilingual(result) { text -> fillInput(text) }
+                // A newer message arrived mid-flight → go again for that one.
+                val next = pendingSnapshot
+                if (next != null && next.signature() != sig && next.latestFrom == "other" &&
+                    prefs.autoAnalyze && isCurrent(memKey(activePkg, next.title))) runAnalysis()
             }
         }
     }
+
+    /** Whether the chat identified by [key] is the one on screen right now. */
+    private fun isCurrent(key: String): Boolean =
+        overlay?.isShowing() == true && memKey(activePkg, currentSnapshot?.title) == key
 
     // ------------------------------------------------------------------ OCR
 
@@ -586,8 +678,11 @@ open class ChatCaptureService : AccessibilityService() {
                 }
             }
             main.post {
-                if (ok) overlay?.toast("已填入，确认后自己发送")
-                else { copyToClipboard(text); overlay?.toast("已复制，长按输入框粘贴") }
+                // The one place that reports the fill result, and it tells the
+                // truth: success only after a verified write/paste. (The reply
+                // card's tap handler no longer pre-announces success.)
+                if (ok) overlay?.snackbar("已填入，确认后自己发送")
+                else { copyToClipboard(text); overlay?.snackbar("已复制，长按输入框粘贴") }
             }
         }
     }
@@ -635,7 +730,13 @@ open class ChatCaptureService : AccessibilityService() {
 
     private fun copyToClipboard(text: String) {
         val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
-        cm.setPrimaryClip(android.content.ClipData.newPlainText("jev_reply", text))
+        val clip = android.content.ClipData.newPlainText("jev_reply", text)
+        // Android 13+ flashes clipboard contents in a preview overlay; a drafted
+        // reply is chat content, so mark it sensitive and keep it out of there.
+        clip.description.extras = android.os.PersistableBundle().apply {
+            putBoolean(android.content.ClipDescription.EXTRA_IS_SENSITIVE, true)
+        }
+        cm.setPrimaryClip(clip)
     }
 
     override fun onInterrupt() {}
@@ -649,11 +750,20 @@ open class ChatCaptureService : AccessibilityService() {
         overlay?.onOcrCapture = null
         overlay?.hide()
         overlay = null
+        // No debounce timers may outlive the service either.
+        main.removeCallbacks(debounce)
+        main.removeCallbacks(captureDebounce)
         worker.shutdownNow()
     }
 
     companion object {
         private const val TAG = "JEVASSIST"
+
+        /** How many of my own past messages go into the prompt as style examples. */
+        private const val STYLE_SAMPLES = 25
+
+        /** Trailing debounce for WINDOW_CONTENT_CHANGED / VIEW_SCROLLED bursts. */
+        private const val CAPTURE_DEBOUNCE_MS = 350L
 
         /** WeChat's package. Reading it (node tree / screenshot / OCR) is what
          *  trips WeChat's anti-screenshot risk control, so it is fully disabled:

@@ -276,7 +276,9 @@ class KbStore private constructor(context: Context) {
     }
 
     /**
-     * Wipe every knowledge-base file. Deletes only `filesDir/kb` — API keys,
+     * Wipe every knowledge-base file, plus ChatMemory's `filesDir/memory`
+     * directory (per-chat transcripts and the style samples), so the settings
+     * "清空知识库与历史" button really clears all stored chat content. API keys,
      * whitelist and every other SharedPreferences value are untouched.
      */
     fun clearAll() = synchronized(lock) {
@@ -285,7 +287,8 @@ class KbStore private constructor(context: Context) {
         logCache.clear()
         lastScreenCache.clear()
         runCatching { root.deleteRecursively() }
-        Log.i(TAG, "kb cleared")
+        runCatching { File(app.filesDir, "memory").deleteRecursively() }
+        Log.i(TAG, "kb+memory cleared")
         Unit
     }
 

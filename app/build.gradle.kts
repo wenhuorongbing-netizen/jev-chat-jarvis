@@ -79,4 +79,6 @@ dependencies {
     // it works on phones with no Google Play services and needs no model download.
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
     testImplementation("junit:junit:4.13.2")
+    // Real org.json for JVM unit tests (the android.jar stub throws on use).
+    testImplementation("org.json:json:20231013")
 }

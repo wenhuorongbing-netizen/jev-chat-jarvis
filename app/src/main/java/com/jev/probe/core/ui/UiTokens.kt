@@ -45,7 +45,7 @@ object UiTokens {
         accent = "#6B76E8",
         accentDeep = "#5A64DC",
         accentLight = "#9AA3F2",
-        accentSoft = "#2B2F4A",
+        accentSoft = "#353B60",
         surfaceElev = "#232840",
         hairline = "#1AFFFFFF",
         danger = "#EF4444",
@@ -55,11 +55,11 @@ object UiTokens {
 
     fun palette(dark: Boolean): Palette = if (dark) DARK else LIGHT
 
-    // §1.2 字号（sp）
-    const val TEXT_BODY = 13.5f
-    const val TEXT_TRANS = 13.5f
-    const val TEXT_AUX = 11.5f
-    const val TEXT_META = 10.5f
+    // §1.2 字号（sp）——v3：整体上移取整，对齐宿主 App 阅读密度
+    const val TEXT_BODY = 14f
+    const val TEXT_TRANS = 14f
+    const val TEXT_AUX = 12f
+    const val TEXT_META = 11f
 
     // §1.3 圆角（dp）
     const val RADIUS_CARD = 10
