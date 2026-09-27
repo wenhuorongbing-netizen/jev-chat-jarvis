@@ -141,4 +141,58 @@ class OverlayRulesTest {
         val v = OverlayRules.errorView("401 timeout", hasReplyKey = true)
         assertEquals(ErrorAction.OPEN_SETTINGS, v.action)
     }
+
+    // ---- rerollNote（Sprint 7「换一条」闭环）----
+
+    @Test
+    fun `rerollNote empty list gives empty string`() {
+        assertEquals("", OverlayRules.rerollNote(emptyList()))
+    }
+
+    @Test
+    fun `rerollNote single rejected reply becomes one quoted instruction`() {
+        assertEquals(
+            "用户否定了这些回复，换不同角度：'好的，明天见'",
+            OverlayRules.rerollNote(listOf("好的，明天见"))
+        )
+    }
+
+    @Test
+    fun `rerollNote keeps only the most recent maxKeep entries`() {
+        // 4 条否定只留最近 3 条（最早的「一」被丢弃）
+        assertEquals(
+            "用户否定了这些回复，换不同角度：'二'；'三'；'四'",
+            OverlayRules.rerollNote(listOf("一", "二", "三", "四"))
+        )
+    }
+
+    @Test
+    fun `rerollNote truncates each entry to 40 chars`() {
+        val long = "很".repeat(50)
+        assertEquals(
+            "用户否定了这些回复，换不同角度：'" + "很".repeat(40) + "'",
+            OverlayRules.rerollNote(listOf(long))
+        )
+    }
+
+    // ---- snappedX（Sprint 7 气泡吸边可选）----
+
+    @Test
+    fun `snappedX snaps to left edge when bubble center is left of midline`() {
+        // center = 100 + 60 = 160 < 540 → 左边缘 margin
+        assertEquals(24, OverlayRules.snappedX(x = 100, screenW = 1080, bubbleW = 120, margin = 24))
+    }
+
+    @Test
+    fun `snappedX snaps to right edge when bubble center is right of midline`() {
+        // center = 800 + 60 = 860 > 540 → 右边缘 screenW - bubbleW - margin
+        assertEquals(936, OverlayRules.snappedX(x = 800, screenW = 1080, bubbleW = 120, margin = 24))
+    }
+
+    @Test
+    fun `snappedX center boundary just-left snaps left and exact-center snaps right`() {
+        // screenW/2 = 540：center 539 在左半，center 540 恰好居中归右侧
+        assertEquals(24, OverlayRules.snappedX(x = 479, screenW = 1080, bubbleW = 120, margin = 24))
+        assertEquals(936, OverlayRules.snappedX(x = 480, screenW = 1080, bubbleW = 120, margin = 24))
+    }
 }

@@ -94,6 +94,14 @@ class OverlayController(private val ctx: Context) {
     /** A caveat about how the current snapshot was captured (OCR mode). */
     private var noteText: String? = null
 
+    /** Sprint 7「换一条」闭环：同一轮里被否定的回复（已填入的那条）。
+     *  服务侧在下一轮生成前调 [consumeRejected] 取走；[resetForNewConversation]
+     *  与新一轮 [showLoading] 兜底清空。只在主线程被触碰。 */
+    private val rejectedThisRound = mutableListOf<String>()
+
+    /** 最近一次点卡片填入的文本：snackbar「换一条」否定的就是它。 */
+    private var lastFilledText: String? = null
+
     /** Whether the overlay window is currently on screen. */
     fun isShowing(): Boolean = root != null
 
@@ -370,11 +378,14 @@ class OverlayController(private val ctx: Context) {
     private fun attachBubbleTouch(v: View, params: WindowManager.LayoutParams) {
         var startX = 0; var startY = 0; var touchX = 0f; var touchY = 0f
         var moved = false; var longFired = false
+        /** 松手吸边动画播放中：吞掉触摸，不与动画抢 params.x（200ms 单次短动画）。 */
+        var snapping = false
         val slop = ViewConfiguration.get(ctx).scaledTouchSlop
         val longPress = Runnable {
             if (!moved) { longFired = true; showBubbleMenu() }
         }
         v.setOnTouchListener { _, e ->
+            if (snapping) return@setOnTouchListener true
             when (e.action) {
                 MotionEvent.ACTION_DOWN -> {
                     startX = params.x; startY = params.y; touchX = e.rawX; touchY = e.rawY
@@ -400,13 +411,50 @@ class OverlayController(private val ctx: Context) {
                     v.removeCallbacks(longPress)
                     bubblePress(false)  // dragged or not, the spring-back always lands
                     // 长按松手也保存落点（长按触发前可能已拖过阈值）
-                    if (moved) { prefs.bubbleX = params.x; prefs.bubbleY = params.y }
+                    if (moved) {
+                        // Sprint 7 可选吸边（prefs.bubbleSnap，默认关）：开了就把
+                        // params.x 平滑吸到较近一侧再存落点；没开维持现状
+                        // 「停在哪就在哪」，躲开 MIUI 边缘手势区。
+                        if (prefs.bubbleSnap) {
+                            snapping = true
+                            snapBubbleToEdge(params) { snapping = false }
+                        } else {
+                            prefs.bubbleX = params.x; prefs.bubbleY = params.y
+                        }
+                    }
                     if (!longFired && !moved) toggle()
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> { v.removeCallbacks(longPress); bubblePress(false); true }
                 else -> false
             }
+        }
+    }
+
+    /** 松手吸边：200ms ValueAnimator 把 params.x 过渡到 [OverlayRules.snappedX]
+     *  （边距 dp(8)，不贴 0），每帧 updateViewLayout，落地后才写 prefs。 */
+    private fun snapBubbleToEdge(params: WindowManager.LayoutParams, onEnd: () -> Unit) {
+        val target = OverlayRules.snappedX(params.x, screenW, dp(BUBBLE), dp(8))
+        if (target == params.x) {   // 已经在吸附位：直接存，不播空动画
+            prefs.bubbleX = params.x; prefs.bubbleY = params.y
+            onEnd(); return
+        }
+        ValueAnimator.ofInt(params.x, target).apply {
+            duration = 200
+            interpolator = DecelerateInterpolator()
+            addUpdateListener {
+                params.x = it.animatedValue as Int
+                root?.let { r -> runCatching { wm.updateViewLayout(r, params) } }
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    prefs.bubbleX = params.x; prefs.bubbleY = params.y
+                    onEnd()
+                }
+                // 取消（hide/拆窗）只收尾不存落点：半途位置不是用户的意图
+                override fun onAnimationCancel(animation: Animator) { onEnd() }
+            })
+            start()
         }
     }
 
@@ -761,6 +809,9 @@ class OverlayController(private val ctx: Context) {
     fun resetForNewConversation() {
         noteText = null
         hasResult = false; loading = false
+        // 换会话 = 新一轮：上一轮的「换一条」否定与填入记录不带过去
+        rejectedThisRound.clear()
+        lastFilledText = null
         headerLabel?.text = ""
         headerLabel?.visibility = View.VISIBLE
         cancelContentAnimators()
@@ -820,6 +871,9 @@ class OverlayController(private val ctx: Context) {
         ensureRoot()
         ctxNotes = 0; ctxHistory = 0   // counts for the round that is starting
         loading = true; hasResult = false
+        // 新一轮生成的兜底清空：正常路径下服务侧已在 showLoading 之前
+        // consumeRejected() 取走否定列表，这里清的是「没来得及消费」的残留。
+        rejectedThisRound.clear()
         setBubble(BubbleState.LOADING)
         // 加载态面板背景与就绪态一致：不透明 surface
         panel?.background = card(UiTokens.RADIUS_PANEL, color(pal.surface), stroke = true)
@@ -834,6 +888,17 @@ class OverlayController(private val ctx: Context) {
     /** A caveat line for the panel (OCR mode); null clears it. */
     fun setNote(note: String?) {
         noteText = note
+    }
+
+    /**
+     * Sprint 7「换一条」闭环：服务侧在下一轮生成前调用，取走本轮被否定的
+     * 回复（返回副本并清空）。调用时机要在 [showLoading] 之前——后者会兜底
+     * 清空，晚于它就拿不到了。
+     */
+    fun consumeRejected(): List<String> {
+        val copy = rejectedThisRound.toList()
+        rejectedThisRound.clear()
+        return copy
     }
 
     /**
@@ -973,11 +1038,19 @@ class OverlayController(private val ctx: Context) {
                 setTypeface(typeface, Typeface.BOLD)
                 setPadding(dp(12), 0, 0, 0)
                 setOnClickListener {
+                    // Sprint 7 闭环：把刚填入的那条记入本轮否定列表，下一轮
+                    // 生成时由服务侧 consumeRejected() 取走，prompt 里换角度。
+                    lastFilledText?.takeIf { it.isNotBlank() }?.let {
+                        rejectedThisRound.add(it)
+                        android.util.Log.d("JEVASSIST",
+                            "overlay: reroll rejected.len=${it.length} total=${rejectedThisRound.size}")
+                    }
                     snackbarHide?.let { pill.removeCallbacks(it) }
                     pill.animate().cancel()
                     r.removeView(pill)
                     if (snackbar === pill) snackbar = null
                     if (!expanded) toggle()
+                    snackbar(REROLL_NOTED)
                 }
             })
         }
@@ -1069,6 +1142,7 @@ class OverlayController(private val ctx: Context) {
             isClickable = true
             setOnClickListener {
                 android.util.Log.d("JEVASSIST", "overlay: fill tapped")
+                lastFilledText = text   // snackbar「换一条」否定的就是这条
                 onFill(text)
                 // 填入是异步的，成功/失败提示由服务侧按真实结果弹；这里不抢话
                 postDelayed({ if (expanded) toggle() }, 150)
@@ -1165,5 +1239,8 @@ class OverlayController(private val ctx: Context) {
         /** 填入成功提示（与 ChatCaptureService.fillInput 的成功文案一致）——
          *  这条 snackbar 右侧带「换一条」动作。 */
         private const val FILL_OK = "已填入，确认后自己发送"
+
+        /** 「换一条」点完后的反馈：否定已记录，下一轮换角度（Sprint 7）。 */
+        private const val REROLL_NOTED = "已记下，下条换个角度"
     }
 }

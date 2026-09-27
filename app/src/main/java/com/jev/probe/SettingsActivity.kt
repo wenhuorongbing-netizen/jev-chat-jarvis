@@ -362,6 +362,12 @@ class SettingsActivity : AppCompatActivity() {
             })
         }
         card3.addView(seek)
+        // Sprint 7：吸边可选，默认关（现状「停在哪就在哪」，躲 MIUI 边缘手势）
+        val snapRow = toggleRow("气泡松手后吸边", prefs.bubbleSnap) { on ->
+            prefs.bubbleSnap = on   // 即改即存
+        }
+        card3.addView(snapRow)
+        card3.addView(text("默认关：停在哪就在哪，避开手机边缘手势", 11f, sub))
         root.addView(card3)
 
         // =================== 关于与隐私 ===================

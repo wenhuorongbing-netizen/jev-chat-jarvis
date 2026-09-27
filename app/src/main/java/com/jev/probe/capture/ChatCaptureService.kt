@@ -20,6 +20,7 @@ import com.jev.probe.core.Msg
 import com.jev.probe.core.Prefs
 import com.jev.probe.core.kb.ContextBuilder
 import com.jev.probe.core.kb.KbStore
+import com.jev.probe.core.ui.OverlayRules
 import com.jev.probe.jev.ReplyClient
 import com.jev.probe.overlay.OverlayController
 import java.util.concurrent.Executors
@@ -369,8 +370,16 @@ open class ChatCaptureService : AccessibilityService() {
     private fun runBilingual(snapshot: ChatSnapshot) {
         if (!prefs.hasReplyKey()) { main.post { overlay?.showError("未设置回复接口密钥，去设置里填") }; return }
         analyzing = true
+        // Sprint 7「换一条」闭环（有意的 prompt 产品决策变更）：上一轮被用户
+        // 否定的已填入回复，这一轮生成要换角度。必须在 main.post{ showLoading() }
+        // 之前取走——showLoading 会兜底清空否定列表。本函数跑在主线程，
+        // consumeRejected 同步执行，顺序可靠。
+        val reroll = OverlayRules.rerollNote(overlay?.consumeRejected().orEmpty())
         main.post { overlay?.showLoading(); overlay?.setNote(snapshot.note) }
-        val rel = prefs.relationship
+        // 否定指令拼在「关系」实参末尾——ReplyClient 不在本 sprint 可改清单内，
+        // 这是用户上下文里落点最靠后的最小侵入注入点。
+        val relBase = prefs.relationship
+        val rel = if (reroll.isEmpty()) relBase else relBase + "\n" + reroll
         val pkg = activePkg ?: ""
         val key = memKey(pkg, snapshot.title)
         val sig = snapshot.signature()

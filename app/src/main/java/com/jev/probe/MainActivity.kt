@@ -9,12 +9,16 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.text.Editable
+import android.text.InputType
+import android.text.TextWatcher
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.animation.OvershootInterpolator
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -22,6 +26,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import android.content.res.Configuration
 import com.jev.probe.core.Prefs
+import com.jev.probe.core.ui.OnboardingRules
 import com.jev.probe.core.ui.UiTokens
 import com.jev.probe.core.ui.color
 import kotlin.math.roundToInt
@@ -85,14 +90,211 @@ class MainActivity : AppCompatActivity() {
     private fun build() {
         container.removeAllViews()
 
-        container.addView(text("Jev 聊天助手", 24f, ink, bold = true))
-        container.addView(text("贴在 WhatsApp / QQ / X / 飞书旁：读出对方新消息，外语翻成中文，给 3 条候选回复。只填入输入框，发送由你点。",
-            13f, sub).apply { setPadding(0, dp(8), 0, dp(16)) })
-
         val a11y = isA11yEnabled()
         val overlay = Settings.canDrawOverlays(this)
         // bilingual 是唯一模式（Sprint 5 / D1），就绪只看回复接口密钥
         val key = prefs.hasReplyKey()
+
+        // Sprint 7：未就绪时是三步向导，就绪（或跳过）后恢复原主页
+        when (OnboardingRules.step(a11y, overlay, key, isOnboarded())) {
+            OnboardingRules.Step.PERMISSIONS -> buildPermissionsStep(a11y, overlay)
+            OnboardingRules.Step.KEY -> buildKeyStep()
+            OnboardingRules.Step.DEMO -> buildDemoStep()
+            OnboardingRules.Step.DONE -> buildHome(a11y, overlay, key)
+        }
+    }
+
+    // ------------------------------------------------------------ onboarding
+
+    private fun isOnboarded(): Boolean = prefs.onboarded
+
+    /** 标记引导完成（点「我准备好了」或「跳过」），刷新进主页。 */
+    private fun finishOnboarding() {
+        prefs.onboarded = true
+        build()
+    }
+
+    /** 每步顶部：左侧步骤指示，右侧「跳过，直接进主页」小字。 */
+    private fun onboardingHeader(index: Int): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+        }
+        row.addView(text("第 $index 步，共 3 步", 12f, color(pal.faint), bold = true).apply {
+            letterSpacing = 0.08f
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        row.addView(text("跳过，直接进主页", 12f, sub).apply {
+            setPadding(dp(8), dp(4), 0, dp(4))
+            setOnClickListener { finishOnboarding() }
+        })
+        return row
+    }
+
+    /** 第 1 步：两个必开权限 + 自启动提醒。 */
+    private fun buildPermissionsStep(a11y: Boolean, overlay: Boolean) {
+        container.addView(onboardingHeader(1))
+        container.addView(text("两步就能用上", 22f, ink, bold = true).apply {
+            setPadding(0, dp(8), 0, dp(4))
+        })
+        container.addView(text("先开两个权限，助手才能读到消息、把卡片贴在聊天窗口上。", 13f, sub))
+        container.addView(permCard("无障碍权限", "读取当前聊天窗口的消息文字（在列表里找到『Jev 聊天助手』）", a11y) {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        })
+        container.addView(permCard("悬浮窗权限", "在聊天窗口上方显示分析卡片", overlay) {
+            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+        })
+        container.addView(permCard("自启动 + 省电无限制", "小米/HyperOS 必做，否则服务被冻结。设过一次即可，这里检测不到，不用重复点。", null) {
+            runCatching {
+                startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+            }
+        })
+    }
+
+    /** 第 2 步：选提供方、粘贴密钥，即改即存。 */
+    private fun buildKeyStep() {
+        container.addView(onboardingHeader(2))
+        container.addView(text("填回复接口密钥", 22f, ink, bold = true).apply {
+            setPadding(0, dp(8), 0, dp(4))
+        })
+        container.addView(text("选一个提供方，再把密钥粘进来。密钥只存在本机。", 13f, sub))
+
+        val c = cardBox()
+        c.addView(text("回复接口密钥", 15f, ink, bold = true))
+        c.addView(text("聊天内容只发往你自己配置的接口", 12f, sub).apply { setPadding(0, dp(4), 0, 0) })
+
+        val chips = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(10), 0, 0)
+        }
+        chips.addView(chip("DeepSeek 官方") {
+            prefs.replyBaseUrl = Prefs.DEEPSEEK_BASE
+            prefs.replyModel = Prefs.DEEPSEEK_MODEL
+            Toast.makeText(this, "已选 DeepSeek 官方", Toast.LENGTH_SHORT).show()
+        })
+        chips.addView(chip("OpenRouter") {
+            prefs.replyBaseUrl = Prefs.DEFAULT_REPLY_BASE
+            prefs.replyModel = Prefs.DEFAULT_REPLY_MODEL
+            Toast.makeText(this, "已选 OpenRouter", Toast.LENGTH_SHORT).show()
+        })
+        c.addView(chips)
+
+        val cont = continueBtn()
+        val keyEdit = EditText(this).apply {
+            hint = "粘贴或输入密钥"
+            textSize = 14f
+            setTextColor(ink)
+            setHintTextColor(sub)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setSingleLine()
+            background = roundBg(dp(10), cardBg)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(12) }
+            setText(prefs.replyKey)
+            setSelection(text.length)
+        }
+        // 即改即存：密钥逐字落盘（Prefs 内部加密），同时刷新「继续」按钮可用态。
+        keyEdit.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                prefs.replyKey = s?.toString().orEmpty()
+                refreshContinue(cont)
+            }
+        })
+        c.addView(keyEdit)
+        c.addView(pasteBtn(keyEdit))
+        container.addView(c)
+
+        refreshContinue(cont)
+        container.addView(cont)
+    }
+
+    /** 「已填好？点继续」：hasReplyKey() 为真才可用。 */
+    private fun continueBtn() = TextView(this).apply {
+        text = "已填好？点继续"
+        textSize = 15f; gravity = Gravity.CENTER; setTypeface(typeface, Typeface.BOLD)
+        setPadding(dp(16), dp(14), dp(16), dp(14))
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(16) }
+    }
+
+    private fun refreshContinue(cont: TextView) {
+        val ok = prefs.hasReplyKey()
+        cont.setTextColor(if (ok) Color.WHITE else sub)
+        cont.background = if (ok) accentGradientBg(14) else roundBg(dp(14), cardBg)
+        if (ok) {
+            cont.pressBounce()
+            cont.setOnClickListener { build() }   // key 已齐，重建后进入第 3 步
+        } else {
+            cont.setOnClickListener(null)
+        }
+    }
+
+    /** 提供方胶囊：点击回填 base/model 默认值。 */
+    private fun chip(label: String, onClick: () -> Unit) = TextView(this).apply {
+        text = label; textSize = 13f; gravity = Gravity.CENTER; setTypeface(typeface, Typeface.BOLD)
+        setTextColor(accent); background = roundBg(dp(16), color(pal.accentSoft))
+        setPadding(dp(14), dp(8), dp(14), dp(8))
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { rightMargin = dp(8) }
+        pressBounce()
+        setOnClickListener { onClick() }
+    }
+
+    /** 有些 ROM 的安全键盘在密码框里不给粘贴：只读剪贴板写进输入框，不显示内容。 */
+    private fun pasteBtn(target: EditText) = TextView(this).apply {
+        text = "粘贴"; textSize = 13f; gravity = Gravity.CENTER
+        setTypeface(typeface, Typeface.BOLD)
+        setTextColor(accent); background = roundBg(dp(10), surface, stroke = true)
+        setPadding(dp(16), dp(8), dp(16), dp(8))
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(8) }
+        setOnClickListener {
+            val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            val clip = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)
+                ?.coerceToText(this@MainActivity)?.toString()?.trim().orEmpty()
+            if (clip.isEmpty()) {
+                Toast.makeText(this@MainActivity, "剪贴板是空的", Toast.LENGTH_SHORT).show()
+            } else {
+                target.setText(clip)
+                Toast.makeText(this@MainActivity, "已粘贴（${clip.length} 位）", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    /** 第 3 步：演示说明 + 「我准备好了」。 */
+    private fun buildDemoStep() {
+        container.addView(onboardingHeader(3))
+        container.addView(text("最后一步，试一试", 22f, ink, bold = true).apply {
+            setPadding(0, dp(8), 0, dp(4))
+        })
+        container.addView(text("去 WhatsApp 或 QQ 打开一个会话。气泡亮起后点它，稍等片刻，再点一条候选回复。回复只会填进输入框，发送由你点。", 14f, ink).apply {
+            setPadding(0, 0, 0, dp(4))
+        })
+        container.addView(TextView(this).apply {
+            text = "我准备好了"
+            textSize = 15f; gravity = Gravity.CENTER; setTypeface(typeface, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            background = accentGradientBg(14)
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(20) }
+            pressBounce()
+            setOnClickListener { finishOnboarding() }
+        })
+    }
+
+    /** 就绪（或引导完成）后的原主页：行为零变化。 */
+    private fun buildHome(a11y: Boolean, overlay: Boolean, key: Boolean) {
+        container.addView(text("Jev 聊天助手", 24f, ink, bold = true))
+        container.addView(text("贴在 WhatsApp / QQ / X / 飞书旁：读出对方新消息，外语翻成中文，给 3 条候选回复。只填入输入框，发送由你点。",
+            13f, sub).apply { setPadding(0, dp(8), 0, dp(16)) })
+
         val ready = a11y && overlay && key
 
         // Readiness card

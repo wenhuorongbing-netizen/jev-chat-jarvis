@@ -229,6 +229,19 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         get() = sp.getInt(K_BUBBLE_X, -1)
         set(v) = sp.edit().putInt(K_BUBBLE_X, v).apply()
 
+    /**
+     * 气泡松手后吸到较近一侧边。默认 false——保持现状「停在哪就在哪」，
+     * 躲开 MIUI/手势导航的边缘返回手势区（Sprint 7，可选开启）。
+     */
+    var bubbleSnap: Boolean
+        get() = sp.getBoolean(K_BUBBLE_SNAP, false)
+        set(v) = sp.edit().putBoolean(K_BUBBLE_SNAP, v).apply()
+
+    /** Sprint 7：首次三步引导已完成（含跳过）。 */
+    var onboarded: Boolean
+        get() = sp.getBoolean(K_ONBOARDED, false)
+        set(v) = sp.edit().putBoolean(K_ONBOARDED, v).apply()
+
     /** Auto-analyze on every incoming message; if false, user taps to analyze. */
     var autoAnalyze: Boolean
         get() = sp.getBoolean(K_AUTO, true)
@@ -360,6 +373,8 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         private const val K_OPACITY = "overlay_opacity"
         private const val K_BUBBLE_Y = "bubble_y"
         private const val K_BUBBLE_X = "bubble_x"
+        private const val K_BUBBLE_SNAP = "bubble_snap"
+        private const val K_ONBOARDED = "onboarded"
         private const val K_AUTO = "auto_analyze"
         private const val K_BILINGUAL = "bilingual_mode"
         private const val K_ABOUT_ME = "about_me"

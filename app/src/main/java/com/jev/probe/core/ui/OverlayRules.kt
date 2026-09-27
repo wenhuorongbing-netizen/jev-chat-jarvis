@@ -50,4 +50,27 @@ object OverlayRules {
         // SPEC A3：原始错误信息不进 UI（可进 logcat，只打长度/条数）。
         return ErrorView("出错了，稍后再试", ErrorAction.RETRY, "重试")
     }
+
+    /**
+     * Sprint 7「换一条」闭环：同一轮里被「换一条」否定的回复，生成下一轮
+     * prompt 时要避开。空列表 → ""；否则取最近 [maxKeep] 条（每条截断 40 字），
+     * 拼成一句中文指令：「用户否定了这些回复，换不同角度：'xx'；'yy'」。
+     */
+    fun rerollNote(rejected: List<String>, maxKeep: Int = 3): String {
+        if (rejected.isEmpty() || maxKeep <= 0) return ""
+        val quoted = rejected.takeLast(maxKeep).joinToString("；") { "'${it.take(40)}'" }
+        return "用户否定了这些回复，换不同角度：$quoted"
+    }
+
+    /**
+     * Sprint 7 气泡吸边（可选，默认关）：松手后吸到较近一侧边，距边 [margin]
+     * （吸边仍保留边距躲 MIUI 边缘手势，不贴 0）。[x] 是气泡左缘；气泡中心在
+     * 屏幕中线左半 → 吸左边，否则吸右边；恰好居中归右侧。
+     */
+    fun snappedX(x: Int, screenW: Int, bubbleW: Int, margin: Int): Int {
+        val right = screenW - bubbleW - margin
+        if (right <= margin) return margin.coerceAtLeast(0)  // 退化窄屏：不抛异常
+        val center = x + bubbleW / 2
+        return if (center < screenW / 2) margin else right
+    }
 }
