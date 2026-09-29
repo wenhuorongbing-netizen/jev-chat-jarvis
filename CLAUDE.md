@@ -1,24 +1,27 @@
 # Jev 聊天助手（安卓）— 全平台非侵入对话副驾
 
-挂在任意聊天 App 旁边（微信、飞书已适配）的非侵入式助手：读到对方最新消息 → 调 Jev 判断 → 悬浮窗给出分析和 3 条候选回复（Jev 排序）→ 人一键填入微信输入框。**发送永远由人手动点，程序不自动发。**
+挂在任意聊天 App 旁边（微信、QQ、飞书、X、WhatsApp 已适配）的非侵入式助手：读到对方最新消息 → 悬浮窗给出分析和 3 条候选回复（bilingual 分支支持中德双语）→ 人一键填入聊天输入框。**发送永远由人手动点，程序不自动发。**
+
+> Sprint 5 起 Jev 判断模式已删除，回复只走 `ReplyClient`。下文 Jev / OpenRouter 相关条目是历史实测记录，动手前先对照现有代码。
 
 ## 硬约束（所有人必须遵守）
 
 1. **不 hook、不 Xposed、不改目标 App、不读其数据库**。只用系统无障碍服务与截屏。
-2. **绝不自动发送消息**，绝不点微信的发送按钮。填入输入框后停手。
+2. **绝不自动发送消息**，绝不点任何 App 的发送按钮。填入输入框后停手。
 3. **不碰钱**：不触碰转账、红包、收款码相关任何界面元素。
-4. **路径全 ASCII**：Android 构建工具在 Windows 上不接受中文路径。项目只能在 `H:\ai_tool\jev-android`。
-5. **密钥不落盘、不进日志、不进 git**：OpenRouter key 从环境变量 `OPENROUTER_API_KEY` 读，或 App 加密设置项。任何文件里都不许出现 `sk-or-` 开头的字符串。
+4. **路径全 ASCII**：Android 构建工具在 Windows 上不接受中文路径。项目只能在 `D:\dev\jev-chat-jarvis`。
+5. **密钥不落盘、不进日志、不进 git**：各路模型（DeepSeek、OpenRouter 等）的 key 只存 App 内 Keystore 加密设置项（`core/KeyVault`），或从环境变量读。任何文件里都不许出现真实 key（如 `sk-or-`、`sk-` 开头的字符串）。
 6. 编码一律 UTF-8。Windows 中文环境下 PowerShell 用 pwsh 7+，Python 读写文件必须显式 `encoding='utf-8'`。
-7. 禁止 `git commit` / `git push`，由人拍板。
+7. 允许 `git commit` / `git push`，但**必须先 review 通过**（如 `/dev-review` 返回 PASS）再提交；push 只推 `origin`（fork），不推 `upstream`。
 
 ## 技术栈
 
 - Kotlin，传统 View + XML，**不用 Compose**
 - minSdk 30，compileSdk / targetSdk 35
-- JDK 17（`H:\android\jdk`），Android SDK 在 `H:\android\sdk`，Gradle 缓存 `H:\android\gradle-home`
+- JDK 17 通过 `JAVA_HOME` 指定（`gradle.properties` 不写绝对路径），Android SDK 在 `C:\Users\Jack\AppData\Local\Android\sdk`（见 `local.properties`，不进 git）
+- 构建：`./gradlew assembleDebug`
 - 目标机：小米 14（houji / 23127PN0CC），HyperOS 3.0 / Android 16 (SDK 36)，微信 8.0.78
-- 模型客户端分三路：`jev/JudgeClient`（判断）、`jev/ReplyClient`（回复）、`jev/VisionClient`（视觉，OCR 用），共用 `jev/HttpJson`；配置在 `core/Prefs`（`judge*` / `reply*` / `vision*` 字段），旧密钥一次性迁移，标记位 `prefs_migrated_v13`。
+- 模型客户端分两路：`jev/ReplyClient`（回复）、`jev/VisionClient`（视觉，OCR 用），共用 `jev/HttpJson`；配置在 `core/Prefs`（`reply*` / `vision*` 字段）。`JudgeClient` 与判断模式已在 Sprint 5 删除，`Prefs` 里残留的 `judge*` 字段仅为老版本升级数据不崩溃。
 - ML Kit `com.google.mlkit:text-recognition-chinese:16.0.1`（bundled，不是 play-services 版），`ndk.abiFilters` 只留 `arm64-v8a`。
 
 ## 关键背景（2026-09-21 实测结论，别重复踩）
@@ -56,3 +59,17 @@
 ## 报告格式
 
 任务完成后写 `_reports/<任务名>_report.md`：根因或做法（带证据）→ 改了什么（逐条列文件）→ 验收命令的**真实输出**（贴原文，不许编）→ **自验缺口**（没验到的明说）。
+
+## Agent skills
+
+### Issue tracker
+
+Issues 记在 GitHub fork（`wenhuorongbing-netizen/jev-chat-jarvis`），用 `gh` CLI，不要发到 upstream。See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+使用默认五个标签：`needs-triage`、`needs-info`、`ready-for-agent`、`ready-for-human`、`wontfix`。See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+single-context：根目录一个 `CONTEXT.md` + `docs/adr/`。See `docs/agents/domain.md`.
