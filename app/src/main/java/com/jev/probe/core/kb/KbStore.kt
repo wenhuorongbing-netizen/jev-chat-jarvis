@@ -137,6 +137,20 @@ class KbStore private constructor(context: Context) {
             ))
             return "已存为联系人「${display}」"
         }
+        return foldInto(existing, title, app)
+    }
+
+    /**
+     * 合并推荐被用户点选后：把这个会话并入 [contactId]（标题记为别名、App 记入）。
+     * 只在用户点了「是同一个人」之后调用；联系人的关系与备注不动。
+     */
+    fun mergeInto(contactId: String, title: String, app: String): String = synchronized(lock) {
+        val existing = contact(contactId) ?: return "联系人已经不在了"
+        foldInto(existing, title, app)
+    }
+
+    /** Add [app] and the raw [title] (as an alias, when not already a known name) to [existing]. */
+    private fun foldInto(existing: Contact, title: String, app: String): String {
         val apps = if (app.isBlank() || existing.apps.contains(app)) existing.apps else existing.apps + app
         val raw = title.trim()
         val known = (listOf(existing.name) + existing.aliases).map { normalizeName(it) }

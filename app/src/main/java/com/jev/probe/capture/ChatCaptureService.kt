@@ -19,6 +19,8 @@ import com.jev.probe.core.ChatMemory
 import com.jev.probe.core.ChatSnapshot
 import com.jev.probe.core.Msg
 import com.jev.probe.core.Prefs
+import com.jev.probe.core.kb.Contact
+import com.jev.probe.core.kb.ContactMatch
 import com.jev.probe.core.kb.ContextBuilder
 import com.jev.probe.RelationInputActivity
 import com.jev.probe.core.kb.KbStore
@@ -467,6 +469,16 @@ open class ChatCaptureService : AccessibilityService() {
             )
         val shown = if (bar) result else result.copy(relationCandidates = emptyList())
         val actions = if (!bar || title == null) null else RelationBarActions(
+            similar = similarContacts(title),
+            onMerge = { contact ->
+                relationSettled.add(key)
+                submit {
+                    val msg = try {
+                        KbStore.get(this).mergeInto(contact.id, title, app)
+                    } catch (e: Exception) { "保存失败：${e.javaClass.simpleName}" }
+                    main.post { overlay?.toast(msg) }
+                }
+            },
             onPick = { relation ->
                 relationSettled.add(key)
                 submit {
@@ -494,6 +506,10 @@ open class ChatCaptureService : AccessibilityService() {
 
     private fun contactExists(title: String, app: String): Boolean =
         try { KbStore.get(this).findContact(title, app) != null } catch (e: Exception) { false }
+
+    /** 合并推荐：名字或别名与 [title] 相同 / 互相包含的联系人，最多三个；只推荐，不合并。 */
+    private fun similarContacts(title: String): List<Contact> =
+        try { ContactMatch.similar(title, KbStore.get(this).contacts()) } catch (e: Exception) { emptyList() }
 
     /** Whether the chat identified by [key] is the one on screen right now. */
     private fun isCurrent(key: String): Boolean =

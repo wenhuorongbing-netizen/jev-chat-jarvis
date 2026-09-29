@@ -42,6 +42,7 @@ import android.widget.TextView
 import androidx.core.app.NotificationManagerCompat
 import com.jev.probe.core.BilingualResult
 import com.jev.probe.core.Prefs
+import com.jev.probe.core.kb.Contact
 import com.jev.probe.core.ui.OverlayRules
 import com.jev.probe.core.ui.OverlayRules.BubbleState
 import com.jev.probe.core.ui.UiTokens
@@ -51,6 +52,9 @@ import kotlin.math.roundToInt
 
 /** What the 关系提议 bar can do; the service supplies these, the overlay only calls them. */
 class RelationBarActions(
+    /** 合并推荐：与会话标题相似的已有联系人（空 = 不出这一步）。 */
+    val similar: List<Contact>,
+    val onMerge: (Contact) -> Unit,
     val onPick: (String) -> Unit,
     val onCustom: () -> Unit,
     val onSkip: () -> Unit
@@ -997,8 +1001,9 @@ class OverlayController(private val ctx: Context) {
         setContent(views)
     }
 
-    /** 关系提议条：一行提示 + 三个候选 chip + 「自己输入」「跳过」。点候选或跳过
-     *  就回调并把整条收掉；从不自己建档，建档由回调侧（服务）在用户点击之后做。 */
+    /** 关系提议条。有相似联系人时先问「是不是同一个人」（合并推荐，点了才并入），
+     *  「都不是」再进入三个候选 chip + 「自己输入」；两步都有「跳过」。点选或跳过就
+     *  回调并把整条收掉；从不自己建档或合并，一切由回调侧（服务）在用户点击之后做。 */
     private fun relationBar(candidates: List<String>, actions: RelationBarActions): View {
         val bar = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
@@ -1006,41 +1011,56 @@ class OverlayController(private val ctx: Context) {
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(10) }
         }
-        bar.addView(hint("对方是？点一个记下来，回复会更贴"))
-        val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
-        candidates.forEachIndexed { i, rel ->
-            row.addView(TextView(ctx).apply {
-                text = rel; textSize = UiTokens.TEXT_AUX; gravity = Gravity.CENTER
-                setTextColor(color(pal.ink)); maxLines = 2
-                ellipsize = TextUtils.TruncateAt.END
-                background = card(UiTokens.RADIUS_CARD, color(pal.card))
-                setPadding(dp(6), dp(7), dp(6), dp(7))
-                isClickable = true
-                setOnClickListener {
-                    (bar.parent as? ViewGroup)?.removeView(bar)
-                    actions.onPick(rel)
-                }
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                    .apply { if (i > 0) leftMargin = dp(6) }
-            })
+        fun close() { (bar.parent as? ViewGroup)?.removeView(bar) }
+
+        fun chips(labels: List<String>, onClick: (Int) -> Unit) = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            labels.forEachIndexed { i, label ->
+                addView(TextView(ctx).apply {
+                    text = label; textSize = UiTokens.TEXT_AUX; gravity = Gravity.CENTER
+                    setTextColor(color(pal.ink)); maxLines = 2
+                    ellipsize = TextUtils.TruncateAt.END
+                    background = card(UiTokens.RADIUS_CARD, color(pal.card))
+                    setPadding(dp(6), dp(7), dp(6), dp(7))
+                    isClickable = true
+                    setOnClickListener { onClick(i) }
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                        .apply { if (i > 0) leftMargin = dp(6) }
+                })
+            }
         }
-        bar.addView(row)
-        // 候选都不准：自己输入（悬浮窗打不了字，由服务拉起输入框）；不想设：跳过
-        val links = LinearLayout(ctx).apply {
+
+        fun links(vararg items: Pair<String, () -> Unit>) = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.END
+            items.forEach { (label, onClick) ->
+                addView(TextView(ctx).apply {
+                    text = label; textSize = UiTokens.TEXT_AUX; setTextColor(color(pal.accent))
+                    setPadding(dp(10), dp(8), dp(4), dp(2))
+                    isClickable = true
+                    setOnClickListener { onClick() }
+                })
+            }
         }
-        fun link(label: String, onClick: () -> Unit) = links.addView(TextView(ctx).apply {
-            text = label; textSize = UiTokens.TEXT_AUX; setTextColor(color(pal.accent))
-            setPadding(dp(10), dp(8), dp(4), dp(2))
-            isClickable = true
-            setOnClickListener { onClick() }
-        })
-        link("自己输入") { actions.onCustom() }
-        link("跳过") {
-            (bar.parent as? ViewGroup)?.removeView(bar)
-            actions.onSkip()
+
+        val skip = "跳过" to { close(); actions.onSkip() }
+
+        fun showRelations() {
+            bar.removeAllViews()
+            bar.addView(hint("对方是？点一个记下来，回复会更贴"))
+            bar.addView(chips(candidates) { i -> close(); actions.onPick(candidates[i]) })
+            // 候选都不准：自己输入（悬浮窗打不了字，由服务拉起输入框）；不想设：跳过
+            bar.addView(links("自己输入" to { actions.onCustom() }, skip))
         }
-        bar.addView(links)
+
+        fun showMerge() {
+            val similar = actions.similar
+            bar.removeAllViews()
+            bar.addView(hint("是不是同一个人？点一个并入"))
+            bar.addView(chips(similar.map { it.name }) { i -> close(); actions.onMerge(similar[i]) })
+            bar.addView(links("都不是" to { showRelations() }, skip))
+        }
+
+        if (actions.similar.isEmpty()) showRelations() else showMerge()
         return bar
     }
 
