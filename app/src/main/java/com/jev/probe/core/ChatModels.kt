@@ -47,5 +47,7 @@ data class BilingualResult(
     val translation: String,
     val replies: List<RankedReply>,
     val lang: String = "",
-    val analysis: String = ""
+    val analysis: String = "",
+    /** 关系提议的三个候选；空 = 没有提议（没要、缺失或格式不对）。 */
+    val relationCandidates: List<String> = emptyList()
 )

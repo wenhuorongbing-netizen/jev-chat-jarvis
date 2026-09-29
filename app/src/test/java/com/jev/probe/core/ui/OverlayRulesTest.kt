@@ -195,4 +195,27 @@ class OverlayRulesTest {
         assertEquals(24, OverlayRules.snappedX(x = 479, screenW = 1080, bubbleW = 120, margin = 24))
         assertEquals(936, OverlayRules.snappedX(x = 480, screenW = 1080, bubbleW = 120, margin = 24))
     }
+
+    // ---- relation proposal ----
+
+    @Test
+    fun `shouldProposeRelation only when no contact, default relationship and not skipped`() {
+        assertTrue(OverlayRules.shouldProposeRelation(hasContact = false, isDefaultRelationship = true, skipped = false))
+        assertFalse(OverlayRules.shouldProposeRelation(hasContact = true, isDefaultRelationship = true, skipped = false))
+        assertFalse(OverlayRules.shouldProposeRelation(hasContact = false, isDefaultRelationship = false, skipped = false))
+        assertFalse(OverlayRules.shouldProposeRelation(hasContact = false, isDefaultRelationship = true, skipped = true))
+    }
+
+    @Test
+    fun `shouldShowRelationBar needs the proposal conditions and candidates`() {
+        val three = listOf("同事", "客服", "朋友")
+        fun bar(hasContact: Boolean = false, isDefault: Boolean = true, skipped: Boolean = false,
+                candidates: List<String> = three) =
+            OverlayRules.shouldShowRelationBar(hasContact, isDefault, skipped, candidates)
+        assertTrue(bar())
+        assertFalse(bar(candidates = emptyList()))
+        assertFalse(bar(hasContact = true))
+        assertFalse(bar(isDefault = false))
+        assertFalse(bar(skipped = true))
+    }
 }

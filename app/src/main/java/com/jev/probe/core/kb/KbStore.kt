@@ -118,8 +118,11 @@ class KbStore private constructor(context: Context) {
     /**
      * Create a contact from a conversation title, or fold the title/app into the
      * one that already matches. Returns a message for the toast.
+     *
+     * @param relationship the user-confirmed relation (关系提议); written only when a
+     *        new contact is created. Merging into an existing one is left as is.
      */
-    fun saveOrMergeContact(title: String, app: String): String {
+    fun saveOrMergeContact(title: String, app: String, relationship: String = ""): String {
         val display = displayName(title)
         if (display.isEmpty()) return "当前会话没有标题，存不了"
         val existing = findContact(title, app)
@@ -129,7 +132,8 @@ class KbStore private constructor(context: Context) {
                 id = newId(),
                 name = display,
                 aliases = aliases,
-                apps = if (app.isBlank()) emptyList() else listOf(app)
+                apps = if (app.isBlank()) emptyList() else listOf(app),
+                relationship = relationship.trim()
             ))
             return "已存为联系人「${display}」"
         }

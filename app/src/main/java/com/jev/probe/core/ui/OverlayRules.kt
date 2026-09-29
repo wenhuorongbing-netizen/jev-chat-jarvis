@@ -63,6 +63,18 @@ object OverlayRules {
     }
 
     /**
+     * 关系提议：请求是否要向模型索取三个关系候选。只有会话没有联系人、
+     * 关系仍是默认值、且没被跳过时才要；其余情况请求内容保持原样。
+     */
+    fun shouldProposeRelation(hasContact: Boolean, isDefaultRelationship: Boolean, skipped: Boolean): Boolean =
+        !hasContact && isDefaultRelationship && !skipped
+
+    /** 提示条是否显示：满足提议条件且模型确实给了候选。 */
+    fun shouldShowRelationBar(
+        hasContact: Boolean, isDefaultRelationship: Boolean, skipped: Boolean, candidates: List<String>
+    ): Boolean = candidates.isNotEmpty() && shouldProposeRelation(hasContact, isDefaultRelationship, skipped)
+
+    /**
      * Sprint 7 气泡吸边（可选，默认关）：松手后吸到较近一侧边，距边 [margin]
      * （吸边仍保留边距躲 MIUI 边缘手势，不贴 0）。[x] 是气泡左缘；气泡中心在
      * 屏幕中线左半 → 吸左边，否则吸右边；恰好居中归右侧。

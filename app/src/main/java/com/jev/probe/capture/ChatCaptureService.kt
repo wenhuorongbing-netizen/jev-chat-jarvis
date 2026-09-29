@@ -115,6 +115,7 @@ open class ChatCaptureService : AccessibilityService() {
                 title.isNullOrBlank() -> overlay?.toast("当前会话没有标题，存不了")
                 isTransientTitle(title) -> overlay?.toast("当前会话标题还没加载出来，稍后再试")
                 else -> submit {
+                    relationSettled.add(memKey(pkg, title))
                     val msg = try {
                         KbStore.get(this).saveOrMergeContact(title, pkg)
                     } catch (e: Exception) { "保存失败：${e.javaClass.simpleName}" }
@@ -240,7 +241,7 @@ open class ChatCaptureService : AccessibilityService() {
             val cached = synchronized(resultCache) { resultCache[memKey(pkg, snapshot.title) + "#" + sig] }
             main.post {
                 overlay?.showIdle(snapshot.title)
-                cached?.let { overlay?.showBilingual(it) { t -> fillInput(t) } }
+                cached?.let { showResult(it, pkg, snapshot.title) }
             }
             return
         }
@@ -266,7 +267,10 @@ open class ChatCaptureService : AccessibilityService() {
         // Already generated for exactly this state (came back to the chat) → show it.
         val cached = synchronized(resultCache) { resultCache[key + "#" + sig] }
         if (cached != null) {
-            main.post { overlay?.showIdle(snapshot.title); overlay?.showBilingual(cached) { fillInput(it) } }
+            main.post {
+                overlay?.showIdle(snapshot.title)
+                showResult(cached, pkg, snapshot.title)
+            }
             return
         }
 
@@ -404,25 +408,68 @@ open class ChatCaptureService : AccessibilityService() {
                 style = emptyList()
             }
             main.post { overlay?.setContextInfo(ctx?.notes?.size ?: 0, ctx?.history?.size ?: 0) }
-            val result = try {
-                ReplyClient(prefs).draftBilingual(snapshot, rel, ctx, transcript, style)
+            // 关系提议：只有确认没联系人、关系仍是默认值时才顺带索取候选。ctx 建失败时
+            // 不确定有没有联系人，按「有」处理（不提）。跳过记忆是后续票（#4），暂恒为未跳过。
+            val hasContact = ctx == null || ctx.contact != null
+            val isDefaultRel = relBase == Prefs.DEFAULT_REL
+            val titleOk = !snapshot.title.isNullOrBlank() && !isTransientTitle(snapshot.title)
+            val propose = titleOk && OverlayRules.shouldProposeRelation(hasContact, isDefaultRel, skipped = false)
+            // 请求发出前才确认没联系人（例如之后被删了）：这个会话重新有资格被提议。
+            // 必须在请求前清，否则会抹掉请求期间用户刚点选留下的标记。
+            if (propose) relationSettled.remove(key)
+            val raw = try {
+                ReplyClient(prefs).draftBilingual(snapshot, rel, ctx, transcript, style, propose)
             } catch (e: Exception) {
                 main.post { analyzing = false; if (isCurrent(key)) overlay?.showError(e.message ?: e.javaClass.simpleName) }
                 return@submit
             }
+            // 没要提议却带了候选（模型自作主张）就丢掉
+            val result = if (propose) raw else raw.copy(relationCandidates = emptyList())
             Log.i(TAG, "bilingual: ${System.currentTimeMillis() - started}ms transcript=${transcript.size} style=${style.size}")
             synchronized(resultCache) { resultCache["$key#$sig"] = result }
             main.post {
                 analyzing = false
                 // The user may have left this chat while we were generating: keep the
                 // result in the cache, but never pop it up over a different chat.
-                if (isCurrent(key)) overlay?.showBilingual(result) { text -> fillInput(text) }
+                if (isCurrent(key)) showResult(result, pkg, snapshot.title)
                 // A newer message arrived mid-flight → go again for that one.
                 val next = pendingSnapshot
                 if (next != null && next.signature() != sig && next.latestFrom == "other" &&
                     prefs.autoAnalyze && isCurrent(memKey(activePkg, next.title))) runAnalysis()
             }
         }
+    }
+
+    /** Conversations (memKey) that got a contact while their results were cached or
+     *  in flight: those results still carry candidates that must not be shown again. */
+    private val relationSettled: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /**
+     * Show a result; the 关系提议 bar goes along only when [OverlayRules.shouldShowRelationBar]
+     * allows it and the title is usable. 建档 happens only in the pick callback,
+     * i.e. after the user's tap.
+     */
+    private fun showResult(result: BilingualResult, pkg: String?, title: String?) {
+        val app = pkg ?: ""
+        val key = memKey(app, title)
+        val bar = !title.isNullOrBlank() && !isTransientTitle(title) &&
+            OverlayRules.shouldShowRelationBar(
+                hasContact = key in relationSettled,
+                isDefaultRelationship = prefs.relationship == Prefs.DEFAULT_REL,
+                skipped = false,
+                candidates = result.relationCandidates
+            )
+        val shown = if (bar) result else result.copy(relationCandidates = emptyList())
+        val onPick: ((String) -> Unit)? = if (!bar || title == null) null else { relation ->
+            relationSettled.add(key)
+            submit {
+                val msg = try {
+                    KbStore.get(this).saveOrMergeContact(title, app, relation)
+                } catch (e: Exception) { "保存失败：${e.javaClass.simpleName}" }
+                main.post { overlay?.toast(msg) }
+            }
+        }
+        overlay?.showBilingual(shown, { fillInput(it) }, onPick)
     }
 
     /** Whether the chat identified by [key] is the one on screen right now. */

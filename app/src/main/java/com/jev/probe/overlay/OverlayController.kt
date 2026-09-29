@@ -952,7 +952,11 @@ class OverlayController(private val ctx: Context) {
 
     /** Bilingual result: translation of the other side, then 3 target-language
      *  replies with Chinese glosses. "填入" fills only the target-language text. */
-    fun showBilingual(r: BilingualResult, onFill: (String) -> Unit) {
+    fun showBilingual(
+        r: BilingualResult,
+        onFill: (String) -> Unit,
+        onPickRelation: ((String) -> Unit)? = null
+    ) {
         ensureRoot()
         // 不透明：候选回复要读清楚，聊天内容透过来会和中文释义叠在一起
         panel?.background = card(UiTokens.RADIUS_PANEL, color(pal.surface), stroke = true)
@@ -972,6 +976,10 @@ class OverlayController(private val ctx: Context) {
             val gloss = if (OverlayRules.shouldShowGloss(r.lang, reply.zh, reply.text)) reply.zh else ""
             views.add(replyCard(i + 1, reply.text, onFill, gloss))
         }
+        // 关系提议条在回复卡片之后：不挡也不拦候选回复，用户想选再选
+        if (onPickRelation != null && r.relationCandidates.isNotEmpty()) {
+            views.add(relationBar(r.relationCandidates, onPickRelation))
+        }
         // 次要信息放最底下：分析压成一行（单行省略）；OCR 提示保留
         if (r.analysis.isNotBlank()) views.add(line(r.analysis, color(pal.sub), UiTokens.TEXT_AUX).apply {
             maxLines = 1
@@ -980,6 +988,37 @@ class OverlayController(private val ctx: Context) {
         })
         noteText?.takeIf { it.isNotBlank() }?.let { views.add(line(it, color(pal.faint), UiTokens.TEXT_META)) }
         setContent(views)
+    }
+
+    /** 关系提议条：一行提示 + 三个候选 chip。点一个就回调并把整条收掉；
+     *  从不自己建档，建档由回调侧（服务）在这次点击之后做。 */
+    private fun relationBar(candidates: List<String>, onPick: (String) -> Unit): View {
+        val bar = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(10) }
+        }
+        bar.addView(hint("对方是？点一个记下来，回复会更贴"))
+        val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        candidates.forEachIndexed { i, rel ->
+            row.addView(TextView(ctx).apply {
+                text = rel; textSize = UiTokens.TEXT_AUX; gravity = Gravity.CENTER
+                setTextColor(color(pal.ink)); maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+                background = card(UiTokens.RADIUS_CARD, color(pal.card))
+                setPadding(dp(6), dp(7), dp(6), dp(7))
+                isClickable = true
+                setOnClickListener {
+                    (bar.parent as? ViewGroup)?.removeView(bar)
+                    onPick(rel)
+                }
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                    .apply { if (i > 0) leftMargin = dp(6) }
+            })
+        }
+        bar.addView(row)
+        return bar
     }
 
     /** 译文行：左侧 2dp accentSoft 竖条分区 + 最多两行、行距 1.25 的粗体译文。 */

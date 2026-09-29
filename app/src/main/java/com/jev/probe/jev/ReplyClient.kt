@@ -46,7 +46,8 @@ class ReplyClient(private val prefs: Prefs) {
         relationship: String,
         ctx: ChatContext? = null,
         transcript: List<Msg> = snapshot.messages,
-        style: List<String> = emptyList()
+        style: List<String> = emptyList(),
+        proposeRelation: Boolean = false
     ): BilingualResult {
         // 窗口起点按 10 条取整：对话往后长几条时前缀不变，DeepSeek 的前缀缓存能命中（便宜很多）
         val start = maxOf(0, (transcript.size - WINDOW + 9) / 10 * 10)
@@ -72,7 +73,8 @@ class ReplyClient(private val prefs: Prefs) {
         else "$relationship（仅供参考，与对话明显不符时以对话为准）"
         sb.append("会话名：").append(snapshot.title ?: "未知").append("\n关系：").append(rel).append('\n')
         if (typical > 0) sb.append("我在这类聊天里一条消息通常约 ").append(typical).append(" 个字符。\n")
-        sb.append("\n对话（最后一条是最新）：\n").append(convo).append("\n\n输出 JSON。")
+        sb.append("\n对话（最后一条是最新）：\n").append(convo).append("\n\n")
+            .append(relationAsk(proposeRelation)).append("输出 JSON。")
         return ReplyParser.parseBilingual(chat(BILINGUAL_SYS, sb.toString(), temperature = 0.9))
     }
 
@@ -129,6 +131,14 @@ class ReplyClient(private val prefs: Prefs) {
 
     companion object {
         private const val WINDOW = 40
+
+        /** Extra instruction for the one request that proposes a relation; empty otherwise.
+         *  Asks for ≤6 chars on purpose: [ReplyParser.MAX_RELATION_LEN] is the looser
+         *  parse-side cap, so a slightly wordy answer still passes. */
+        internal fun relationAsk(propose: Boolean): String =
+            if (!propose) "" else
+                "JSON 里再加一个字段 \"relations\"：3 个不同的候选，写对方和我最可能是什么关系" +
+                    "（如 同事、客服、朋友），根据会话名和对话内容判断，每个不超过 6 个字，不要写句子。\n"
 
         /** Static, so it is a cacheable prefix. Rules target the usual tells of
          *  machine-written chat: too long, too polite, too tidy, restating. */
@@ -203,7 +213,28 @@ internal object ReplyParser {
         if (replies.isEmpty()) throw IllegalStateException("模型没有给出候选回复")
         return BilingualResult(
             obj.optString("translation").trim(), replies.take(3),
-            lang = obj.optString("lang").trim(), analysis = obj.optString("analysis").trim()
+            lang = obj.optString("lang").trim(), analysis = obj.optString("analysis").trim(),
+            relationCandidates = parseRelations(obj.optJSONArray("relations"))
         )
+    }
+
+    /** A relation is a few words, not a sentence. */
+    internal const val MAX_RELATION_LEN = 10
+
+    /**
+     * Exactly three distinct, non-blank, short strings — otherwise no proposal at
+     * all. A half-usable list is worse than none: the bar would show two chips or
+     * a sentence, and the reply cards must never depend on it.
+     */
+    private fun parseRelations(arr: JSONArray?): List<String> {
+        arr ?: return emptyList()
+        val out = ArrayList<String>()
+        for (i in 0 until arr.length()) {
+            val s = (arr.opt(i) as? String)?.trim().orEmpty()
+            if (s.isEmpty() || s.length > MAX_RELATION_LEN) return emptyList()
+            if (out.any { it.equals(s, ignoreCase = true) }) return emptyList()
+            out.add(s)
+        }
+        return if (out.size == 3) out else emptyList()
     }
 }
