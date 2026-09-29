@@ -32,6 +32,13 @@
             android:name=".KnowledgeActivity"
             android:exported="false" />
 
+        <activity
+            android:name=".RelationInputActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.JevProbe.Transparent" />
+
         <service
             android:name="com.google.android.accessibility.selecttospeak.SelectToSpeakService"
             android:exported="true"

@@ -49,6 +49,13 @@ import com.jev.probe.core.ui.color
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
+/** What the 关系提议 bar can do; the service supplies these, the overlay only calls them. */
+class RelationBarActions(
+    val onPick: (String) -> Unit,
+    val onCustom: () -> Unit,
+    val onSkip: () -> Unit
+)
+
 /**
  * Floating overlay: a small draggable bubble that expands into a panel with the
  * translation plus 3 candidate replies (bilingual is the only mode since the
@@ -955,7 +962,7 @@ class OverlayController(private val ctx: Context) {
     fun showBilingual(
         r: BilingualResult,
         onFill: (String) -> Unit,
-        onPickRelation: ((String) -> Unit)? = null
+        relation: RelationBarActions? = null
     ) {
         ensureRoot()
         // 不透明：候选回复要读清楚，聊天内容透过来会和中文释义叠在一起
@@ -977,8 +984,8 @@ class OverlayController(private val ctx: Context) {
             views.add(replyCard(i + 1, reply.text, onFill, gloss))
         }
         // 关系提议条在回复卡片之后：不挡也不拦候选回复，用户想选再选
-        if (onPickRelation != null && r.relationCandidates.isNotEmpty()) {
-            views.add(relationBar(r.relationCandidates, onPickRelation))
+        if (relation != null && r.relationCandidates.isNotEmpty()) {
+            views.add(relationBar(r.relationCandidates, relation))
         }
         // 次要信息放最底下：分析压成一行（单行省略）；OCR 提示保留
         if (r.analysis.isNotBlank()) views.add(line(r.analysis, color(pal.sub), UiTokens.TEXT_AUX).apply {
@@ -990,9 +997,9 @@ class OverlayController(private val ctx: Context) {
         setContent(views)
     }
 
-    /** 关系提议条：一行提示 + 三个候选 chip。点一个就回调并把整条收掉；
-     *  从不自己建档，建档由回调侧（服务）在这次点击之后做。 */
-    private fun relationBar(candidates: List<String>, onPick: (String) -> Unit): View {
+    /** 关系提议条：一行提示 + 三个候选 chip + 「自己输入」「跳过」。点候选或跳过
+     *  就回调并把整条收掉；从不自己建档，建档由回调侧（服务）在用户点击之后做。 */
+    private fun relationBar(candidates: List<String>, actions: RelationBarActions): View {
         val bar = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(
@@ -1011,13 +1018,29 @@ class OverlayController(private val ctx: Context) {
                 isClickable = true
                 setOnClickListener {
                     (bar.parent as? ViewGroup)?.removeView(bar)
-                    onPick(rel)
+                    actions.onPick(rel)
                 }
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                     .apply { if (i > 0) leftMargin = dp(6) }
             })
         }
         bar.addView(row)
+        // 候选都不准：自己输入（悬浮窗打不了字，由服务拉起输入框）；不想设：跳过
+        val links = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.END
+        }
+        fun link(label: String, onClick: () -> Unit) = links.addView(TextView(ctx).apply {
+            text = label; textSize = UiTokens.TEXT_AUX; setTextColor(color(pal.accent))
+            setPadding(dp(10), dp(8), dp(4), dp(2))
+            isClickable = true
+            setOnClickListener { onClick() }
+        })
+        link("自己输入") { actions.onCustom() }
+        link("跳过") {
+            (bar.parent as? ViewGroup)?.removeView(bar)
+            actions.onSkip()
+        }
+        bar.addView(links)
         return bar
     }
 

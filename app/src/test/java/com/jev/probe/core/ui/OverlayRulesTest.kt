@@ -217,5 +217,7 @@ class OverlayRulesTest {
         assertFalse(bar(hasContact = true))
         assertFalse(bar(isDefault = false))
         assertFalse(bar(skipped = true))
+        // 选定之后（已有联系人）与跳过叠加，同样不显示
+        assertFalse(bar(hasContact = true, skipped = true))
     }
 }

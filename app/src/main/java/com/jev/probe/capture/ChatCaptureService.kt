@@ -2,6 +2,7 @@ package com.jev.probe.capture
 
 import android.accessibilityservice.AccessibilityService
 import android.graphics.Bitmap
+import android.content.Intent
 import android.graphics.Rect
 import android.os.Bundle
 import android.os.Handler
@@ -19,10 +20,13 @@ import com.jev.probe.core.ChatSnapshot
 import com.jev.probe.core.Msg
 import com.jev.probe.core.Prefs
 import com.jev.probe.core.kb.ContextBuilder
+import com.jev.probe.RelationInputActivity
 import com.jev.probe.core.kb.KbStore
+import com.jev.probe.core.kb.RelationSkips
 import com.jev.probe.core.ui.OverlayRules
 import com.jev.probe.jev.ReplyClient
 import com.jev.probe.overlay.OverlayController
+import com.jev.probe.overlay.RelationBarActions
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 
@@ -409,11 +413,12 @@ open class ChatCaptureService : AccessibilityService() {
             }
             main.post { overlay?.setContextInfo(ctx?.notes?.size ?: 0, ctx?.history?.size ?: 0) }
             // 关系提议：只有确认没联系人、关系仍是默认值时才顺带索取候选。ctx 建失败时
-            // 不确定有没有联系人，按「有」处理（不提）。跳过记忆是后续票（#4），暂恒为未跳过。
+            // 不确定有没有联系人，按「有」处理（不提）。跳过过的会话（按 App+标题记，见 RelationSkips）也不提。
             val hasContact = ctx == null || ctx.contact != null
             val isDefaultRel = relBase == Prefs.DEFAULT_REL
             val titleOk = !snapshot.title.isNullOrBlank() && !isTransientTitle(snapshot.title)
-            val propose = titleOk && OverlayRules.shouldProposeRelation(hasContact, isDefaultRel, skipped = false)
+            val skipped = RelationSkips.contains(prefs.relationSkips, pkg, snapshot.title)
+            val propose = titleOk && OverlayRules.shouldProposeRelation(hasContact, isDefaultRel, skipped)
             // 请求发出前才确认没联系人（例如之后被删了）：这个会话重新有资格被提议。
             // 必须在请求前清，否则会抹掉请求期间用户刚点选留下的标记。
             if (propose) relationSettled.remove(key)
@@ -452,25 +457,43 @@ open class ChatCaptureService : AccessibilityService() {
     private fun showResult(result: BilingualResult, pkg: String?, title: String?) {
         val app = pkg ?: ""
         val key = memKey(app, title)
-        val bar = !title.isNullOrBlank() && !isTransientTitle(title) &&
+        val bar = result.relationCandidates.isNotEmpty() && !title.isNullOrBlank() && !isTransientTitle(title) &&
             OverlayRules.shouldShowRelationBar(
-                hasContact = key in relationSettled,
+                // 缓存的结果可能早于建档（自己输入、菜单存档都不经过这里），以库里为准
+                hasContact = key in relationSettled || contactExists(title, app),
                 isDefaultRelationship = prefs.relationship == Prefs.DEFAULT_REL,
-                skipped = false,
+                skipped = RelationSkips.contains(prefs.relationSkips, app, title),
                 candidates = result.relationCandidates
             )
         val shown = if (bar) result else result.copy(relationCandidates = emptyList())
-        val onPick: ((String) -> Unit)? = if (!bar || title == null) null else { relation ->
-            relationSettled.add(key)
-            submit {
-                val msg = try {
-                    KbStore.get(this).saveOrMergeContact(title, app, relation)
-                } catch (e: Exception) { "保存失败：${e.javaClass.simpleName}" }
-                main.post { overlay?.toast(msg) }
+        val actions = if (!bar || title == null) null else RelationBarActions(
+            onPick = { relation ->
+                relationSettled.add(key)
+                submit {
+                    val msg = try {
+                        KbStore.get(this).saveOrMergeContact(title, app, relation)
+                    } catch (e: Exception) { "保存失败：${e.javaClass.simpleName}" }
+                    main.post { overlay?.toast(msg) }
+                }
+            },
+            onCustom = {
+                runCatching {
+                    startActivity(Intent(this, RelationInputActivity::class.java)
+                        .putExtra(RelationInputActivity.EXTRA_TITLE, title)
+                        .putExtra(RelationInputActivity.EXTRA_APP, app)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }
+            },
+            onSkip = {
+                prefs.relationSkips = RelationSkips.add(prefs.relationSkips, app, title)
+                overlay?.toast("这个会话不再提示关系")
             }
-        }
-        overlay?.showBilingual(shown, { fillInput(it) }, onPick)
+        )
+        overlay?.showBilingual(shown, { fillInput(it) }, actions)
     }
+
+    private fun contactExists(title: String, app: String): Boolean =
+        try { KbStore.get(this).findContact(title, app) != null } catch (e: Exception) { false }
 
     /** Whether the chat identified by [key] is the one on screen right now. */
     private fun isCurrent(key: String): Boolean =

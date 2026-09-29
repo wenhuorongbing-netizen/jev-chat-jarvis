@@ -214,6 +214,11 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         get() = sp.getStringSet(K_WHITELIST, emptySet()) ?: emptySet()
         set(v) = sp.edit().putStringSet(K_WHITELIST, v).apply()
 
+    /** Conversations whose relation proposal the user skipped; see [com.jev.probe.core.kb.RelationSkips]. */
+    var relationSkips: Set<String>
+        get() = sp.getStringSet(K_REL_SKIPS, emptySet()) ?: emptySet()
+        set(v) = sp.edit().putStringSet(K_REL_SKIPS, v).apply()
+
     /** Overlay panel opacity, 60..100 (%). Lower lets the chat show through. */
     var overlayOpacity: Int
         get() = sp.getInt(K_OPACITY, 92).coerceIn(60, 100)
@@ -370,6 +375,7 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         private const val K_REL = "relationship"
         private const val K_ENABLED = "enabled"
         private const val K_WHITELIST = "whitelist"
+        private const val K_REL_SKIPS = "relation_skips"
         private const val K_OPACITY = "overlay_opacity"
         private const val K_BUBBLE_Y = "bubble_y"
         private const val K_BUBBLE_X = "bubble_x"
