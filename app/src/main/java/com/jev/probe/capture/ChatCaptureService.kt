@@ -425,7 +425,7 @@ open class ChatCaptureService : AccessibilityService() {
             // 必须在请求前清，否则会抹掉请求期间用户刚点选留下的标记。
             if (propose) relationSettled.remove(key)
             val raw = try {
-                ReplyClient(prefs).draftBilingual(snapshot, rel, ctx, transcript, style, propose)
+                ReplyClient(prefs).draftBilingual(snapshot, rel, ctx, transcript, style, propose, KbStore.isGroupTitle(snapshot.title))
             } catch (e: Exception) {
                 main.post { analyzing = false; if (isCurrent(key)) overlay?.showError(e.message ?: e.javaClass.simpleName) }
                 return@submit

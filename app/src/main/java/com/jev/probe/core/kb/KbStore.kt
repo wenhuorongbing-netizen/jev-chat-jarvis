@@ -133,7 +133,8 @@ class KbStore private constructor(context: Context) {
                 name = display,
                 aliases = aliases,
                 apps = if (app.isBlank()) emptyList() else listOf(app),
-                relationship = relationship.trim()
+                relationship = relationship.trim(),
+                isGroup = isGroupTitle(title)
             ))
             return "已存为联系人「${display}」"
         }
@@ -349,6 +350,7 @@ class KbStore private constructor(context: Context) {
                     relationship = o.optString("relationship"),
                     notes = o.optString("notes"),
                     autoSummary = o.optString("autoSummary"),
+                    isGroup = o.optBoolean("isGroup", false),
                     updatedAt = o.optLong("updatedAt", 0L)
                 ))
             }
@@ -402,6 +404,7 @@ class KbStore private constructor(context: Context) {
                 .put("relationship", c.relationship)
                 .put("notes", c.notes)
                 .put("autoSummary", c.autoSummary)
+                .put("isGroup", c.isGroup)
                 .put("updatedAt", c.updatedAt))
         }
         return arr.toString()
@@ -543,6 +546,17 @@ class KbStore private constructor(context: Context) {
             if (s.isNullOrEmpty()) return ""
             val t = stripTrailingCount(stripZeroWidth(s).trim())
             return t.trim().lowercase()
+        }
+
+        /**
+         * 标题是不是群：名字后面跟着成员数 `(12)`（半角/全角括号都算）。首期只看这一条，
+         * 判断不出来（含正则编译失败）就按个人处理。括号前没有名字的不算。
+         */
+        fun isGroupTitle(s: String?): Boolean {
+            if (s.isNullOrBlank()) return false
+            val t = stripZeroWidth(s).trim()
+            val re = TRAILING_COUNT ?: return false
+            return re.containsMatchIn(t) && re.replace(t, "").isNotBlank()
         }
 
         /** Same cleanup as [normalizeName] but keeps the original casing, for display. */

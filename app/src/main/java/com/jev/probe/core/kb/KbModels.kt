@@ -35,6 +35,8 @@ data class Contact(
     val notes: String = "",
     /** Reserved for the (deferred) auto-summary; never written in v1.3. */
     val autoSummary: String = "",
+    /** 群聊。首期只由标题末尾的成员数判断（[KbStore.isGroupTitle]），老文件没有这个字段，按个人读。 */
+    val isGroup: Boolean = false,
     val updatedAt: Long = System.currentTimeMillis()
 )
 

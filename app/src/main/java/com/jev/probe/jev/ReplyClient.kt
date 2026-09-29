@@ -47,7 +47,8 @@ class ReplyClient(private val prefs: Prefs) {
         ctx: ChatContext? = null,
         transcript: List<Msg> = snapshot.messages,
         style: List<String> = emptyList(),
-        proposeRelation: Boolean = false
+        proposeRelation: Boolean = false,
+        isGroup: Boolean = false
     ): BilingualResult {
         // 窗口起点按 10 条取整：对话往后长几条时前缀不变，DeepSeek 的前缀缓存能命中（便宜很多）
         val start = maxOf(0, (transcript.size - WINDOW + 9) / 10 * 10)
@@ -74,7 +75,7 @@ class ReplyClient(private val prefs: Prefs) {
         sb.append("会话名：").append(snapshot.title ?: "未知").append("\n关系：").append(rel).append('\n')
         if (typical > 0) sb.append("我在这类聊天里一条消息通常约 ").append(typical).append(" 个字符。\n")
         sb.append("\n对话（最后一条是最新）：\n").append(convo).append("\n\n")
-            .append(relationAsk(proposeRelation)).append("输出 JSON。")
+            .append(relationAsk(proposeRelation, isGroup)).append("输出 JSON。")
         return ReplyParser.parseBilingual(chat(BILINGUAL_SYS, sb.toString(), temperature = 0.9))
     }
 
@@ -134,11 +135,16 @@ class ReplyClient(private val prefs: Prefs) {
 
         /** Extra instruction for the one request that proposes a relation; empty otherwise.
          *  Asks for ≤6 chars on purpose: [ReplyParser.MAX_RELATION_LEN] is the looser
-         *  parse-side cap, so a slightly wordy answer still passes. */
-        internal fun relationAsk(propose: Boolean): String =
-            if (!propose) "" else
-                "JSON 里再加一个字段 \"relations\"：3 个不同的候选，写对方和我最可能是什么关系" +
-                    "（如 同事、客服、朋友），根据会话名和对话内容判断，每个不超过 6 个字，不要写句子。\n"
+         *  parse-side cap, so a slightly wordy answer still passes.
+         *  For a group the candidates are group types (同事群…); they still land in the
+         *  contact's relationship field. */
+        internal fun relationAsk(propose: Boolean, isGroup: Boolean = false): String {
+            if (!propose) return ""
+            val who = if (isGroup) "这个群对我来说是什么群" else "对方和我最可能是什么关系"
+            val eg = if (isGroup) "同事群、家人群、同学群" else "同事、客服、朋友"
+            return "JSON 里再加一个字段 \"relations\"：3 个不同的候选，写${who}" +
+                "（如 ${eg}），根据会话名和对话内容判断，每个不超过 6 个字，不要写句子。\n"
+        }
 
         /** Static, so it is a cacheable prefix. Rules target the usual tells of
          *  machine-written chat: too long, too polite, too tidy, restating. */

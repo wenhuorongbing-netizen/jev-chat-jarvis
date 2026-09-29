@@ -312,7 +312,8 @@ class KnowledgeActivity : AppCompatActivity() {
                     apps = existing?.apps ?: emptyList(),
                     relationship = relEdit.text.toString().trim(),
                     notes = notesEdit.text.toString().trim(),
-                    autoSummary = existing?.autoSummary ?: ""
+                    autoSummary = existing?.autoSummary ?: "",
+                    isGroup = existing?.isGroup ?: false
                 ))
                 render()
             }
