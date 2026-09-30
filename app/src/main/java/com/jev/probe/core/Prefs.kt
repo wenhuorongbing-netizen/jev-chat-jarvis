@@ -134,21 +134,21 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
     // --------------------------------------------------------------- vision
 
     /**
-     * Blank = the OpenRouter vision default. Deliberately does NOT follow
-     * [replyBaseUrl]: a reply host like DeepSeek has no vision endpoint, so
-     * inheriting it would silently break OCR.
+     * Blank / never saved = same source as the reply route (see [VisionRoute]):
+     * DeepSeek when replies use DeepSeek, otherwise the OpenRouter preset.
      */
     var visionBaseUrl: String
-        get() = sp.getString(K_VISION_BASE, DEFAULT_VISION_BASE) ?: DEFAULT_VISION_BASE
+        get() = sp.getString(K_VISION_BASE, null)?.ifBlank { null } ?: VisionRoute.defaultBase(replyBaseUrl)
         set(v) = sp.edit().putString(K_VISION_BASE, v.trim()).apply()
 
-    /** Blank = fall back to [replyKey] then [judgeKey]. Plaintext in/out, ciphertext at rest. */
+    /** Blank = fall back to the reply key, but only for the same host. Plaintext in/out, ciphertext at rest. */
     var visionKey: String
         get() = readSecret(K_VISION_KEY)
         set(v) = writeSecret(K_VISION_KEY, v)
 
+    /** Blank / never saved = `deepseek-flash` on DeepSeek, else the OpenRouter preset. */
     var visionModel: String
-        get() = sp.getString(K_VISION_MODEL, DEFAULT_VISION_MODEL) ?: DEFAULT_VISION_MODEL
+        get() = sp.getString(K_VISION_MODEL, null)?.ifBlank { null } ?: VisionRoute.defaultModel(visionBaseUrl)
         set(v) = sp.edit().putString(K_VISION_MODEL, v.trim()).apply()
 
     // -------------------------------------------------------- context (D)
@@ -320,17 +320,19 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
     @Suppress("DEPRECATION")
     fun effectiveReplyKey(): String = replyKey.ifBlank { judgeKey }
 
-    /** Vision route key, falling back to reply then the legacy judge key. */
-    fun effectiveVisionKey(): String = visionKey.ifBlank { effectiveReplyKey() }
+    /**
+     * Vision route key. Blank falls back to the reply key (then the legacy judge
+     * key) only when both routes share scheme, host and port — a key is never sent
+     * to a different vendor than the one it was entered for.
+     */
+    fun effectiveVisionKey(): String =
+        VisionRoute.effectiveKey(visionKey, visionBaseUrl, replyBaseUrl, effectiveReplyKey())
 
     /** Full POST URL for the OpenAI-compatible chat completions call. */
     fun replyEndpoint(): String = "${replyBaseUrl.trim().trimEnd('/')}/chat/completions"
 
-    /** Same shape as [replyEndpoint]; blank falls back to the OpenRouter default. */
-    fun visionEndpoint(): String {
-        val base = visionBaseUrl.trim().ifBlank { DEFAULT_VISION_BASE }
-        return "${base.trimEnd('/')}/chat/completions"
-    }
+    /** Same shape as [replyEndpoint]. */
+    fun visionEndpoint(): String = "${visionBaseUrl.trim().trimEnd('/')}/chat/completions"
 
     fun isAllowed(title: String?): Boolean {
         val wl = whitelist
@@ -407,9 +409,10 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         const val DASHSCOPE_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
         const val DASHSCOPE_MODEL = "qwen-plus"
 
-        // Vision route preset (OpenRouter region-available; user may change).
+        // Vision route presets. The default follows the reply route, see [VisionRoute].
         const val DEFAULT_VISION_BASE = "https://openrouter.ai/api/v1"
         const val DEFAULT_VISION_MODEL = "qwen/qwen2.5-vl-72b-instruct"
+        const val DEEPSEEK_VISION_MODEL = "deepseek-flash"
         const val DASHSCOPE_VISION_MODEL = "qwen-vl-max"
 
         const val DEFAULT_REL = "对方是我的伴侣；from=me 的是我发的，from=other 的是对方发的"

@@ -26,10 +26,12 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.doAfterTextChanged
 import com.jev.probe.core.Prefs
+import com.jev.probe.core.VisionRoute
 import com.jev.probe.core.kb.KbSelfCheck
 import com.jev.probe.core.kb.KbStore
 import com.jev.probe.core.ui.UiTokens
 import com.jev.probe.core.ui.color
+import com.jev.probe.jev.ModelCapabilities
 import com.jev.probe.jev.ReplyClient
 import com.jev.probe.jev.VisionClient
 import java.util.concurrent.Executors
@@ -163,28 +165,37 @@ class SettingsActivity : AppCompatActivity() {
 
         // --- 识图接口 ---
         val visionCard = card()
-        visionCard.addView(cardTitle("识图接口（截图识别用，一般不用填）"))
-        visionCard.addView(text("读不到控件文字的 App 会走截图识别。", 12f, sub))
+        visionCard.addView(cardTitle("识图接口（默认与回复同一家，一般不用填）"))
+        visionCard.addView(text("读不到控件文字的 App 会走截图识别。回复用 DeepSeek 时，识图直接用同一把密钥。", 12f, sub))
 
-        val visionBaseEdit = edit(prefs.visionBaseUrl, Prefs.DEFAULT_VISION_BASE)
-        val visionModelEdit = edit(prefs.visionModel, Prefs.DEFAULT_VISION_MODEL)
+        val visionBaseEdit = edit(prefs.visionBaseUrl, Prefs.DEEPSEEK_BASE)
+        val visionModelEdit = edit(prefs.visionModel, Prefs.DEEPSEEK_VISION_MODEL)
 
+        // 框里正好是「跟随回复」的默认值就存空：这样只改密钥不会把默认值钉死，
+        // 之后回复换成 DeepSeek，识图也跟着走。
         fun saveVision() {
-            prefs.visionBaseUrl = visionBaseEdit.text.toString().trim()
+            val replyBase = prefs.replyBaseUrl
+            val base = visionBaseEdit.text.toString().trim()
+                .let { if (it.trimEnd('/') == VisionRoute.defaultBase(replyBase)) "" else it }
+            prefs.visionBaseUrl = base
             prefs.visionKey = visionKeyEdit.text.toString()
-            prefs.visionModel = visionModelEdit.text.toString().trim().ifBlank { Prefs.DEFAULT_VISION_MODEL }
+            val effectiveBase = base.ifBlank { VisionRoute.defaultBase(replyBase) }
+            prefs.visionModel = visionModelEdit.text.toString().trim()
+                .let { if (it == VisionRoute.defaultModel(effectiveBase)) "" else it }
         }
 
         val visionIdx = when (prefs.visionBaseUrl.trim().trimEnd('/')) {
-            Prefs.DEFAULT_VISION_BASE -> 0
-            Prefs.DASHSCOPE_BASE -> 1
-            else -> 2
+            Prefs.DEEPSEEK_BASE -> 0
+            Prefs.DEFAULT_VISION_BASE -> 1
+            Prefs.DASHSCOPE_BASE -> 2
+            else -> 3
         }
         visionCard.addView(pills(
-            listOf("OpenRouter", "通义兼容", "自定义"), visionIdx) { idx ->
+            listOf("DeepSeek 官方", "OpenRouter", "通义兼容", "自定义"), visionIdx) { idx ->
             when (idx) {
-                0 -> { visionBaseEdit.setText(Prefs.DEFAULT_VISION_BASE); visionModelEdit.setText(Prefs.DEFAULT_VISION_MODEL) }
-                1 -> { visionBaseEdit.setText(Prefs.DASHSCOPE_BASE); visionModelEdit.setText(Prefs.DASHSCOPE_VISION_MODEL) }
+                0 -> { visionBaseEdit.setText(Prefs.DEEPSEEK_BASE); visionModelEdit.setText(Prefs.DEEPSEEK_VISION_MODEL) }
+                1 -> { visionBaseEdit.setText(Prefs.DEFAULT_VISION_BASE); visionModelEdit.setText(Prefs.DEFAULT_VISION_MODEL) }
+                2 -> { visionBaseEdit.setText(Prefs.DASHSCOPE_BASE); visionModelEdit.setText(Prefs.DASHSCOPE_VISION_MODEL) }
             }
             saveVision()   // 即改即存
         })
@@ -192,7 +203,7 @@ class SettingsActivity : AppCompatActivity() {
         visionBaseEdit.saveDebounced { saveVision() }
         visionCard.addView(visionBaseEdit)
         visionCard.addView(label("密钥"))
-        visionCard.addView(edit(prefs.visionKey, "留空则用回复接口密钥", password = true).also {
+        visionCard.addView(edit(prefs.visionKey, "留空则用回复接口密钥（仅限同一家）", password = true).also {
             visionKeyEdit = it
             it.saveDebounced { saveVision() }
         })
@@ -203,18 +214,15 @@ class SettingsActivity : AppCompatActivity() {
         val visionResult = resultText()
         visionCard.addView(cardBtn("测试视觉") {
             val visionBase = visionBaseEdit.text.toString().trim()
-            if (!VisionClient.supportsVision(visionBase.ifBlank { Prefs.DEFAULT_VISION_BASE })) {
-                visionResult.text = GUARD_NO_VISION
-                return@cardBtn
-            }
             val probe = draftPrefs(SCRATCH_VISION) {
                 replyBaseUrl = replyBaseEdit.text.toString().trim().ifBlank { Prefs.DEFAULT_REPLY_BASE }
                 replyKey = replyKeyEdit.text.toString().trim()
+                replyModel = replyModelEdit.text.toString().trim().ifBlank { Prefs.DEFAULT_REPLY_MODEL }
                 visionBaseUrl = visionBase
                 visionKey = visionKeyEdit.text.toString().trim()
-                visionModel = visionModelEdit.text.toString().trim().ifBlank { Prefs.DEFAULT_VISION_MODEL }
+                visionModel = visionModelEdit.text.toString().trim()
             }
-            if (probe.effectiveVisionKey().isBlank()) { visionResult.text = "请先填密钥（或填回复接口密钥）"; return@cardBtn }
+            if (probe.effectiveVisionKey().isBlank()) { visionResult.text = "请先填密钥（和回复是同一家时可留空用回复密钥）"; return@cardBtn }
             visionResult.text = "测试中…"
             worker.execute {
                 val t0 = System.currentTimeMillis()
@@ -223,9 +231,13 @@ class SettingsActivity : AppCompatActivity() {
                     VisionClient(probe).ask(whitePixelJpegB64(), "这张图是什么颜色？只回答颜色。")
                 } catch (e: Exception) { err = e.message; "" }
                 val ms = System.currentTimeMillis() - t0
+                // 回复模型能不能直接看图（供后面「图直接附进回复请求」用），顺手查一次
+                val replySees = if (err != null) null else ModelCapabilities.shared.supportsImage(
+                    probe.replyBaseUrl, probe.effectiveReplyKey(), probe.replyModel)
                 main.post {
                     visionResult.text = if (err != null) "失败（${ms}ms）：$err"
-                    else "成功 ${ms}ms · ${out.replace("\n", " ").take(60)}"
+                    else "成功 ${ms}ms · ${out.replace("\n", " ").take(60)}" +
+                        "\n回复模型${if (replySees == true) "支持" else "不支持（或查不到）"}直接看图"
                 }
             }
         })
@@ -613,10 +625,6 @@ class SettingsActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "JEVASSIST"
-
-        /** DeepSeek's official API has no vision model; say so instead of a 400. */
-        private const val GUARD_NO_VISION =
-            "该接口不支持视觉（DeepSeek 官方没有 image_url），请换 OpenRouter 或通义兼容"
 
         /** One scratch prefs file per test button; never the real config. */
         private const val SCRATCH_REPLY = "jev_probe_scratch_reply"

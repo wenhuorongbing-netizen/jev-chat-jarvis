@@ -12,9 +12,9 @@ import org.json.JSONObject
  * accepts `image_url` content parts. A-stage shell only — B stage wires it to
  * the screenshot pipeline (see docs/v1.3-plan.md "OCR 分层").
  *
- * Reads visionBaseUrl / visionKey / visionModel from [Prefs]. The base URL does
- * not inherit from the reply route (a DeepSeek-style host has no vision
- * endpoint); the key still falls back reply -> judge.
+ * Reads visionBaseUrl / visionKey / visionModel from [Prefs]. Unset values follow
+ * the reply route (DeepSeek reply -> `deepseek-flash` on the same key); whether
+ * a model takes images is asked of the provider, see [ModelCapabilities].
  *
  * Wire format notes that cost real debugging time:
  * - JPEG, not PNG: a screenshot as PNG base64 is several times larger.
@@ -64,9 +64,5 @@ class VisionClient(private val prefs: Prefs) {
             bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
             return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
         }
-
-        /** DeepSeek's official API has no vision model; `image_url` is rejected. */
-        fun supportsVision(baseUrl: String): Boolean =
-            !baseUrl.contains("api.deepseek.com", ignoreCase = true)
     }
 }

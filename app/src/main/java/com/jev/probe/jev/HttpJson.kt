@@ -104,6 +104,35 @@ object HttpJson {
         throw last ?: ApiException(route, null, "请求失败")
     }
 
+    /**
+     * Single GET, no retry (callers treat any failure as "unknown"). Returns the
+     * body of a 2xx response; anything else throws [ApiException].
+     */
+    fun get(url: String, key: String, route: String): String {
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 10000
+                readTimeout = 15000
+                setRequestProperty("Authorization", "Bearer $key")
+                setRequestProperty("Accept", "application/json")
+                headersFor(url).forEach { (k, v) -> setRequestProperty(k, v) }
+            }
+            val code = conn.responseCode
+            if (code !in 200..299) {
+                throw ApiException(route, code, readBody(conn.errorStream).ifBlank { "（响应体为空）" })
+            }
+            return readBody(conn.inputStream)
+        } catch (e: ApiException) {
+            throw e
+        } catch (e: Exception) {
+            throw ApiException(route, null, describe(e))
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
     /** Body text, or "" — a null stream or a read failure never costs us the status code. */
     private fun readBody(stream: java.io.InputStream?): String {
         stream ?: return ""
