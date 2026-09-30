@@ -52,13 +52,21 @@ class VisionRouteTest {
 
     @Test
     fun `own vision key always wins`() {
-        assertEquals("vk", VisionRoute.effectiveKey("vk", ds, or, "rk"))
+        assertEquals("vk", VisionRoute.keyWithSameOriginFallback("vk", ds, or, "rk"))
     }
 
     @Test
     fun `blank vision key borrows the reply key only from the same origin`() {
-        assertEquals("rk", VisionRoute.effectiveKey("", ds, "https://api.deepseek.com/v1/", "rk"))
-        assertEquals("", VisionRoute.effectiveKey("", ds, or, "rk"))
-        assertEquals("", VisionRoute.effectiveKey("", "http://api.deepseek.com/v1", ds, "rk"))
+        assertEquals("rk", VisionRoute.keyWithSameOriginFallback("", ds, "https://api.deepseek.com/v1/", "rk"))
+        assertEquals("", VisionRoute.keyWithSameOriginFallback("", ds, or, "rk"))
+        assertEquals("", VisionRoute.keyWithSameOriginFallback("", "http://api.deepseek.com/v1", ds, "rk"))
+    }
+
+    @Test
+    fun `legacy judge key is never lent to a reply route on another vendor`() {
+        // reply route = DeepSeek, legacy judge route = OpenRouter: the OpenRouter key must not go to DeepSeek
+        assertEquals("", VisionRoute.keyWithSameOriginFallback("", ds, or, "judge-key"))
+        assertEquals("judge-key", VisionRoute.keyWithSameOriginFallback("", or, "https://openrouter.ai/api/v1/", "judge-key"))
+        assertEquals("own", VisionRoute.keyWithSameOriginFallback("own", ds, or, "judge-key"))
     }
 }

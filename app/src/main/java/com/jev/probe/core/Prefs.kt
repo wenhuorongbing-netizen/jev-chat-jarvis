@@ -121,7 +121,7 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         get() = sp.getString(K_REPLY_BASE, DEFAULT_REPLY_BASE) ?: DEFAULT_REPLY_BASE
         set(v) = sp.edit().putString(K_REPLY_BASE, v.trim()).apply()
 
-    /** Blank = fall back to [judgeKey]. Plaintext in/out, ciphertext at rest. */
+    /** Blank = fall back to [judgeKey] when both bases share an origin. Plaintext in/out, ciphertext at rest. */
     var replyKey: String
         get() = readSecret(K_REPLY_KEY)
         set(v) = writeSecret(K_REPLY_KEY, v)
@@ -316,9 +316,14 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         sp.edit().putString(storageKey, stored).apply()
     }
 
-    /** Reply route key, falling back to the legacy judge key (old installs). */
+    /**
+     * Reply route key. Blank falls back to the legacy judge key (old installs) only
+     * when the judge base shares an origin with the reply base — an old OpenRouter
+     * key must never be sent to a different vendor.
+     */
     @Suppress("DEPRECATION")
-    fun effectiveReplyKey(): String = replyKey.ifBlank { judgeKey }
+    fun effectiveReplyKey(): String =
+        VisionRoute.keyWithSameOriginFallback(replyKey, replyBaseUrl, judgeBaseUrl, judgeKey)
 
     /**
      * Vision route key. Blank falls back to the reply key (then the legacy judge
@@ -326,7 +331,7 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
      * to a different vendor than the one it was entered for.
      */
     fun effectiveVisionKey(): String =
-        VisionRoute.effectiveKey(visionKey, visionBaseUrl, replyBaseUrl, effectiveReplyKey())
+        VisionRoute.keyWithSameOriginFallback(visionKey, visionBaseUrl, replyBaseUrl, effectiveReplyKey())
 
     /** Full POST URL for the OpenAI-compatible chat completions call. */
     fun replyEndpoint(): String = "${replyBaseUrl.trim().trimEnd('/')}/chat/completions"

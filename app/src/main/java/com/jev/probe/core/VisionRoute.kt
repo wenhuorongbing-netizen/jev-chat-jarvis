@@ -28,9 +28,13 @@ object VisionRoute {
         return oa == originOf(b)
     }
 
-    /** The vision key to send: its own, else the reply key when both routes share an origin, else blank. */
-    fun effectiveKey(visionKey: String, visionBase: String, replyBase: String, replyKey: String): String =
-        visionKey.ifBlank { if (sameOrigin(visionBase, replyBase)) replyKey else "" }
+    /**
+     * The key to send to [ownBase]: its own, else [fallbackKey] when [fallbackBase]
+     * shares scheme, host and port with it, else blank. A stored key is only ever
+     * lent between routes that point at the same vendor.
+     */
+    fun keyWithSameOriginFallback(ownKey: String, ownBase: String, fallbackBase: String, fallbackKey: String): String =
+        ownKey.ifBlank { if (sameOrigin(ownBase, fallbackBase)) fallbackKey else "" }
 
     private fun uriOf(url: String): URI? = try { URI(url.trim()) } catch (_: Exception) { null }
 

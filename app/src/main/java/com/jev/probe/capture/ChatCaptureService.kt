@@ -17,6 +17,9 @@ import com.jev.probe.core.BubbleRect
 import com.jev.probe.core.BilingualResult
 import com.jev.probe.core.ChatMemory
 import com.jev.probe.core.ChatSnapshot
+import com.jev.probe.core.FillGuard
+import com.jev.probe.core.FillTarget
+import com.jev.probe.core.FillVerdict
 import com.jev.probe.core.Msg
 import com.jev.probe.core.Prefs
 import com.jev.probe.core.kb.Contact
@@ -247,7 +250,7 @@ open class ChatCaptureService : AccessibilityService() {
             val cached = synchronized(resultCache) { resultCache[memKey(pkg, snapshot.title) + "#" + sig] }
             main.post {
                 overlay?.showIdle(snapshot.title)
-                cached?.let { showResult(it, pkg, snapshot.title) }
+                cached?.let { showResult(it, pkg, snapshot.title, sig) }
             }
             return
         }
@@ -275,7 +278,7 @@ open class ChatCaptureService : AccessibilityService() {
         if (cached != null) {
             main.post {
                 overlay?.showIdle(snapshot.title)
-                showResult(cached, pkg, snapshot.title)
+                showResult(cached, pkg, snapshot.title, sig)
             }
             return
         }
@@ -438,7 +441,7 @@ open class ChatCaptureService : AccessibilityService() {
                 analyzing = false
                 // The user may have left this chat while we were generating: keep the
                 // result in the cache, but never pop it up over a different chat.
-                if (isCurrent(key)) showResult(result, pkg, snapshot.title)
+                if (isCurrent(key)) showResult(result, pkg, snapshot.title, sig)
                 // A newer message arrived mid-flight → go again for that one.
                 val next = pendingSnapshot
                 if (next != null && next.signature() != sig && next.latestFrom == "other" &&
@@ -456,7 +459,7 @@ open class ChatCaptureService : AccessibilityService() {
      * allows it and the title is usable. 建档 happens only in the pick callback,
      * i.e. after the user's tap.
      */
-    private fun showResult(result: BilingualResult, pkg: String?, title: String?) {
+    private fun showResult(result: BilingualResult, pkg: String?, title: String?, signature: String) {
         val app = pkg ?: ""
         val key = memKey(app, title)
         val bar = result.relationCandidates.isNotEmpty() && !title.isNullOrBlank() && !isTransientTitle(title) &&
@@ -501,7 +504,8 @@ open class ChatCaptureService : AccessibilityService() {
                 overlay?.toast("这个会话不再提示关系")
             }
         )
-        overlay?.showBilingual(shown, { fillInput(it) }, actions)
+        val target = FillTarget(app, title, signature)
+        overlay?.showBilingual(shown, { fillInput(it, target) }, actions)
     }
 
     private fun contactExists(title: String, app: String): Boolean =
@@ -706,13 +710,34 @@ open class ChatCaptureService : AccessibilityService() {
         }
     }
 
-    /** Fill the chat input box with the chosen reply (never sends). */
-    private fun fillInput(text: String) {
+    /**
+     * Is the screen right now still the conversation [target] was generated for?
+     * Asked before every write, because the user can switch chat or app between
+     * the tap and the fill (the click/retry path sleeps for hundreds of ms).
+     * Without a positive answer nothing is written into any input box.
+     */
+    private fun stillOnTarget(target: FillTarget): Boolean {
+        val root = rootInActiveWindow
+        val pkg = root?.packageName?.toString()
+        val live = if (root != null && pkg != null) adapterFor(pkg)?.extract(root, resources) else null
+        val verdict = FillGuard.check(target, pkg, live) { !isTransientTitle(it) }
+        if (verdict != FillVerdict.ALLOW) Log.i(TAG, "fill: refused ${verdict.name}")
+        return verdict == FillVerdict.ALLOW
+    }
+
+    /**
+     * Fill the chat input box with the chosen reply (never sends). Only into the
+     * conversation in [target]; if that cannot be confirmed the text is copied
+     * instead and the user pastes it by hand.
+     */
+    private fun fillInput(text: String, target: FillTarget) {
         submit {
+            var refused = false
             // Fast path: SET_TEXT works when the box already has input focus and no
             // IME composing session is active.
-            var ok = trySetText(text)
-            if (!ok) {
+            var ok = trySetText(text, target)
+            if (!ok && !stillOnTarget(target)) refused = true
+            if (!ok && !refused) {
                 // Otherwise focus the box (pops the keyboard) and retry SET_TEXT;
                 // if the IME composing region still swallows it (WeChat), PASTE from
                 // the clipboard. The box is cleared before PASTE so a SET_TEXT that
@@ -722,16 +747,21 @@ open class ChatCaptureService : AccessibilityService() {
                 if (edit != null) {
                     edit.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                     Thread.sleep(300)
-                    ok = trySetText(text)
-                    if (!ok) {
-                        copyToClipboard(text)
-                        val focused = rootInActiveWindow?.let { findEditable(it) } ?: edit
-                        setTextRaw(focused, "")
-                        val pasted = focused.performAction(AccessibilityNodeInfo.ACTION_PASTE)
-                        Thread.sleep(150)
-                        val after = readInput()
-                        ok = (after != null && after.contains(text)) || (pasted && after == null)
-                        Log.i(TAG, "fill: paste=$pasted readback=${after?.length ?: -1}")
+                    ok = trySetText(text, target)
+                    if (!ok && !stillOnTarget(target)) refused = true
+                    if (!ok && !refused) {
+                        // Last check right before the clear + paste, on the node fetched
+                        // now — never the one from before the click.
+                        if (!stillOnTarget(target)) refused = true
+                        else rootInActiveWindow?.let { findEditable(it) }?.let { focused ->
+                            copyToClipboard(text)
+                            setTextRaw(focused, "")
+                            val pasted = focused.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+                            Thread.sleep(150)
+                            val after = readInput()
+                            ok = (after != null && after.contains(text)) || (pasted && after == null)
+                            Log.i(TAG, "fill: paste=$pasted readback=${after?.length ?: -1}")
+                        }
                     }
                 }
             }
@@ -740,13 +770,15 @@ open class ChatCaptureService : AccessibilityService() {
                 // truth: success only after a verified write/paste. (The reply
                 // card's tap handler no longer pre-announces success.)
                 if (ok) overlay?.snackbar("已填入，确认后自己发送")
+                else if (refused) { copyToClipboard(text); overlay?.snackbar("当前已不是这个会话，没有填入；回复已复制") }
                 else { copyToClipboard(text); overlay?.snackbar("已复制，长按输入框粘贴") }
             }
         }
     }
 
-    /** Set text on the chat input box, verifying it actually took. */
-    private fun trySetText(text: String): Boolean {
+    /** Set text on the chat input box, verifying it actually took. Writes nothing off-target. */
+    private fun trySetText(text: String, target: FillTarget): Boolean {
+        if (!stillOnTarget(target)) return false
         val edit = rootInActiveWindow?.let { findEditable(it) } ?: return false
         if (!setTextRaw(edit, text)) return false
         // SET_TEXT can report success without filling an unfocused box; verify.

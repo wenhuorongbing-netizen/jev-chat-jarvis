@@ -27,9 +27,26 @@ class ApiException(
 ) : RuntimeException(buildMessage(route, status, snippet)) {
 
     companion object {
-        fun buildMessage(route: String, status: Int?, snippet: String): String =
-            if (status != null) "$route HTTP $status：${snippet.take(120)}"
-            else "$route 请求失败：${snippet.take(120)}"
+        fun buildMessage(route: String, status: Int?, snippet: String): String {
+            val safe = Redact.secrets(snippet).take(120)
+            return if (status != null) "$route HTTP $status：$safe" else "$route 请求失败：$safe"
+        }
+    }
+}
+
+/**
+ * Error bodies are shown in the overlay and can end up in a crash file, and some
+ * providers echo the offending key back ("Incorrect API key provided: sk-…").
+ * Whatever key-shaped text or the literal key in use is masked before it can
+ * leave the HTTP layer.
+ */
+object Redact {
+    private val KEYISH = Regex("""(?i)bearer\s+[A-Za-z0-9._\-]{8,}|\bsk-[A-Za-z0-9_\-]{6,}""")
+
+    fun secrets(text: String, key: String = ""): String {
+        val literal = key.trim()
+        val masked = if (literal.length >= 6) text.replace(literal, "***") else text
+        return KEYISH.replace(masked, "***")
     }
 }
 
@@ -83,7 +100,7 @@ object HttpJson {
                 // status, which then got retried even for a 401.
                 if (code !in 200..299) {
                     val errText = readBody(conn.errorStream)
-                    throw ApiException(route, code, errText.ifBlank { "（响应体为空）" })
+                    throw ApiException(route, code, Redact.secrets(errText, key).ifBlank { "（响应体为空）" })
                 }
                 val text = readBody(conn.inputStream)
                 if (text.isBlank()) throw ApiException(route, code, "响应体为空")
@@ -121,7 +138,7 @@ object HttpJson {
             }
             val code = conn.responseCode
             if (code !in 200..299) {
-                throw ApiException(route, code, readBody(conn.errorStream).ifBlank { "（响应体为空）" })
+                throw ApiException(route, code, Redact.secrets(readBody(conn.errorStream), key).ifBlank { "（响应体为空）" })
             }
             return readBody(conn.inputStream)
         } catch (e: ApiException) {
