@@ -1,6 +1,7 @@
 package com.jev.probe.contract
 
 import com.jev.probe.core.ChatSnapshot
+import com.jev.probe.capture.ChatAdapters
 import com.jev.probe.core.FillGuard
 import com.jev.probe.core.FillSupportMap
 import com.jev.probe.core.FillTarget
@@ -120,18 +121,18 @@ class ContractV1Test {
     }
 
     @Test
-    fun `fill support matches the contract`() {
+    fun `production fill capability equals the contract declaration`() {
         val d = doc("fill_support.json")
         val statuses = (0 until d.getJSONArray("statuses").length()).map { d.getJSONArray("statuses").getString(it) }.toSet()
-        val android = d.getJSONArray("entries").objects().filter { it.getString("platform") == "android" }
+        val declared = d.getJSONArray("entries").objects().filter { it.getString("platform") == "android" }
             .associate { it.getString("app") to it.getString("status") }
-        assertEquals(android, FillSupportMap.byApp.mapValues { it.value.wire })
-        assertTrue(statuses.containsAll(android.values))
-        assertEquals(FillSupportMap.byApp.keys, FillSupportMap.packages.keys)
-        // The package names must be the adapters' own (the declaration cannot drift from the code).
-        val adapters = generateSequence(File("").absoluteFile) { it.parentFile }
-            .map { File(it, "app/src/main/java/com/jev/probe/capture/ChatAppAdapter.kt") }.first { it.isFile }.readText()
-        for ((app, pkg) in FillSupportMap.packages) assertTrue("$app: $pkg", adapters.contains("\"$pkg\""))
+        assertTrue(statuses.containsAll(declared.values))
+        // What the adapters actually do (the fill path obeys ChatAppAdapter.fillSupport), grouped by contract app id.
+        val production = ChatAdapters.all.groupBy({ FillSupportMap.appOf(it.pkg) ?: error("no contract app for ${it.pkg}") }) { it.fillSupport.wire }
+        for ((app, wires) in production) assertEquals("$app: adapters of one app must agree", 1, wires.toSet().size)
+        assertEquals(declared, production.mapValues { it.value.first() })
+        // Every package the contract lists is really an adapter's package.
+        assertEquals(FillSupportMap.packages.values.flatten().toSet(), ChatAdapters.all.map { it.pkg }.toSet())
     }
 
 }

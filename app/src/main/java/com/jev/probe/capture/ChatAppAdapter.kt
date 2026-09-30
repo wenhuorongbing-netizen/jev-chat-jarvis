@@ -5,6 +5,7 @@ import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
 import com.jev.probe.core.BubbleRect
 import com.jev.probe.core.ChatSnapshot
+import com.jev.probe.core.FillSupport
 import com.jev.probe.core.Msg
 
 /**
@@ -26,6 +27,9 @@ import com.jev.probe.core.Msg
  */
 interface ChatAppAdapter {
     val pkg: String
+
+    /** How a tapped reply reaches this app's input box (contracts/jev/v1/fill_support.json declares the same; a test keeps them equal). */
+    val fillSupport: FillSupport
     fun extract(root: AccessibilityNodeInfo, res: Resources): ChatSnapshot?
 }
 
@@ -138,6 +142,7 @@ internal fun findWeChatTitle(
  *  text) is exactly the case OCR fallback exists for. */
 class WeChatAdapter : ChatAppAdapter {
     override val pkg = "com.tencent.mm"
+    override val fillSupport = FillSupport.COPY_ONLY  // obfuscated tree: no proof of the conversation
 
     override fun extract(root: AccessibilityNodeInfo, res: Resources): ChatSnapshot? {
         val width = res.displayMetrics.widthPixels
@@ -196,6 +201,7 @@ class WeChatAdapter : ChatAppAdapter {
  */
 class QQAdapter : ChatAppAdapter {
     override val pkg = "com.tencent.mobileqq"
+    override val fillSupport = FillSupport.FRESH_VERIFIED
 
     override fun extract(root: AccessibilityNodeInfo, res: Resources): ChatSnapshot? {
         val width = res.displayMetrics.widthPixels
@@ -318,6 +324,7 @@ internal fun collectFeishuBubbleRects(
  */
 class FeishuAdapter : ChatAppAdapter {
     override val pkg = "com.ss.android.lark"
+    override val fillSupport = FillSupport.COPY_ONLY  // bodies are drawn, not in the tree: OCR-only
 
     override fun extract(root: AccessibilityNodeInfo, res: Resources): ChatSnapshot? {
         val width = res.displayMetrics.widthPixels
@@ -439,6 +446,7 @@ internal fun parseXDesc(desc: String): Pair<String, String>? {
  */
 class XAdapter : ChatAppAdapter {
     override val pkg = "com.twitter.android"
+    override val fillSupport = FillSupport.FRESH_VERIFIED
 
     override fun extract(root: AccessibilityNodeInfo, res: Resources): ChatSnapshot? {
         val width = res.displayMetrics.widthPixels
@@ -523,6 +531,7 @@ class XAdapter : ChatAppAdapter {
  * to the screen border is the sender's side. Unverified on a real device.
  */
 class WhatsAppAdapter(override val pkg: String = PKG) : ChatAppAdapter {
+    override val fillSupport = FillSupport.FRESH_VERIFIED
 
     override fun extract(root: AccessibilityNodeInfo, res: Resources): ChatSnapshot? {
         val width = res.displayMetrics.widthPixels

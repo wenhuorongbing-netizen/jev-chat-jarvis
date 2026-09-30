@@ -15,13 +15,20 @@ import com.jev.probe.capture.ocr.OcrLine
 import com.jev.probe.capture.ocr.ScreenCapture
 import com.jev.probe.core.BubbleRect
 import com.jev.probe.core.BilingualResult
+import com.jev.probe.core.CapturedSnapshot
+import com.jev.probe.core.ConversationRef
+import com.jev.probe.core.ConversationState
 import com.jev.probe.core.ChatMemory
 import com.jev.probe.core.ChatSnapshot
 import com.jev.probe.core.FillGuard
+import com.jev.probe.core.FillSupport
 import com.jev.probe.core.FillTarget
 import com.jev.probe.core.FillVerdict
+import com.jev.probe.core.GenerationRequest
 import com.jev.probe.core.Msg
+import com.jev.probe.core.OcrTicket
 import com.jev.probe.core.Prefs
+import com.jev.probe.core.SnapshotSource
 import com.jev.probe.core.kb.Contact
 import com.jev.probe.core.kb.ContactMatch
 import com.jev.probe.core.kb.ContextBuilder
@@ -60,7 +67,7 @@ open class ChatCaptureService : AccessibilityService() {
      *  disabled and handled by a short-circuit notice instead of an adapter (see
      *  [maybeCapture] / [onAccessibilityEvent]). [WeChatAdapter] is kept in the
      *  codebase for a possible future restore, just not used here. */
-    private val adapters = listOf(QQAdapter(), XAdapter(), FeishuAdapter(), WhatsAppAdapter(), WhatsAppAdapter(WhatsAppAdapter.PKG_BUSINESS)).associateBy { it.pkg }
+    private val adapters = ChatAdapters.live
 
     /** Submit to the worker, ignoring rejection after the service is torn down
      *  (a stale overlay callback must never crash the process). */
@@ -70,9 +77,9 @@ open class ChatCaptureService : AccessibilityService() {
     private lateinit var prefs: Prefs
     private var overlay: OverlayController? = null
 
-    private var lastSignature: String = ""
-    private var activePkg: String? = null
-    private var analyzing = false
+    /** The one owner of the current conversation and of which generation / OCR pass is still
+     *  wanted. Capture, network and UI only report events to it (see [ConversationState]). */
+    private val state = ConversationState()
 
     /** Last known-good (non-transient) title per package. See [isTransientTitle]:
      *  a page like X's DM thread briefly shows "连接中…" as `snapshot.title`
@@ -84,8 +91,6 @@ open class ChatCaptureService : AccessibilityService() {
     /** Trailing debounce for the high-frequency content/scrolled event stream:
      *  one capture pass per burst, not one per event. */
     private val captureDebounce = Runnable { maybeCapture() }
-    private var pendingSnapshot: ChatSnapshot? = null
-    @Volatile private var currentSnapshot: ChatSnapshot? = null
     private var foregroundPkg: String? = null
 
     // ---- OCR path (B stage). Everything here runs on the main thread: the
@@ -96,7 +101,6 @@ open class ChatCaptureService : AccessibilityService() {
             restoreOverlay = { overlay?.setHiddenForShot(false) })
     }
     private val ocr = MlKitOcr()
-    private var ocrBusy = false
 
     /** What the screen looked like the last time we fired an automatic shot.
      *  See [ocrSignature]: this is the brake on the OCR path. */
@@ -113,18 +117,18 @@ open class ChatCaptureService : AccessibilityService() {
         prefs = Prefs(this)
         overlay = OverlayController(this)
         overlay?.onManualAnalyze = {
-            currentSnapshot?.let { pendingSnapshot = it; runAnalysis() }
+            state.current?.let { state.pend(it); runAnalysis() }
         }
         // Bubble menu: file the open conversation as a knowledge-base contact.
         // Contacts are never created automatically — this is the one-tap way in.
         overlay?.onSaveContact = {
-            val title = currentSnapshot?.title
-            val pkg = activePkg ?: foregroundPkg ?: ""
+            val title = state.current?.snapshot?.title
+            val pkg = state.activePkg ?: foregroundPkg ?: ""
             when {
                 title.isNullOrBlank() -> overlay?.toast("当前会话没有标题，存不了")
                 isTransientTitle(title) -> overlay?.toast("当前会话标题还没加载出来，稍后再试")
                 else -> submit {
-                    relationSettled.add(memKey(pkg, title))
+                    relationSettled.add(ConversationRef(pkg, title).key)
                     val msg = try {
                         KbStore.get(this).saveOrMergeContact(title, pkg)
                     } catch (e: Exception) { "保存失败：${e.javaClass.simpleName}" }
@@ -148,7 +152,7 @@ open class ChatCaptureService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
-        if (!prefs.enabled) { main.post { overlay?.hide() }; return }
+        if (!prefs.enabled) { hideOverlay(); return }
 
         val type = event.eventType
         // Decide "did we leave the chat app" from the REAL active window, not the
@@ -176,7 +180,7 @@ open class ChatCaptureService : AccessibilityService() {
                 wechatNoticeShown = false // left WeChat → allow the notice again next visit
                 // IME / status bar events can report their own package while the
                 // chat app stays underneath — only a real app switch hides us.
-                if (!fg.contains("inputmethod", true) && fg != "com.android.systemui") main.post { overlay?.hide() }
+                if (!fg.contains("inputmethod", true) && fg != "com.android.systemui") hideOverlay()
                 return
             }
         }
@@ -194,6 +198,14 @@ open class ChatCaptureService : AccessibilityService() {
         }
     }
 
+    /** Take the panel away, and with it any generation or OCR pass still in flight: a result that
+     *  comes back after the panel was dismissed (left the chat, assistant off) must not revive it. */
+    private fun hideOverlay() {
+        state.invalidate()
+        main.removeCallbacks(debounce)
+        main.post { overlay?.hide() }
+    }
+
     private fun maybeCapture() {
         val root = rootInActiveWindow ?: return
         val pkg = root.packageName?.toString()
@@ -205,11 +217,11 @@ open class ChatCaptureService : AccessibilityService() {
         val adapter = pkg?.let { adapterFor(it) } ?: return
         // Outside a chat window (conversation list, profile, settings…): no bubble.
         val rawSnapshot = adapter.extract(root, resources)
-        if (rawSnapshot == null) { main.post { overlay?.hide() }; return }
+        if (rawSnapshot == null) { hideOverlay(); return }
         // Stabilize the title BEFORE anything below reads it: some apps (X) show
         // a transient "连接中…" title for a moment right after opening a thread.
         val snapshot = stabilizeTitle(pkg ?: "", rawSnapshot)
-        if (!prefs.isAllowed(snapshot.title)) { main.post { overlay?.hide() }; return }
+        if (!prefs.isAllowed(snapshot.title)) { hideOverlay(); return }
         // In a chat window but the tree holds no text (Feishu draws its bodies,
         // WeChat hides them when the disguise fails) → screenshot + OCR, subject
         // to ScreenCapture's own >=1s throttle and failure backoff.
@@ -235,22 +247,28 @@ open class ChatCaptureService : AccessibilityService() {
             return
         }
 
-        // Switching to another adapted app resets the dedupe signature, so two apps
-        // whose last few messages happen to match cannot swallow each other.
-        if (pkg != activePkg) { activePkg = pkg; lastSignature = "" }
-
-        currentSnapshot = snapshot
-        val sig = snapshot.signature()
+        // One owner decides what is current: it resets the dedupe signature on an app switch and
+        // retires any generation still running for the previous content.
+        val cap = CapturedSnapshot(ConversationRef(pkg ?: "", snapshot.title), snapshot, SnapshotSource.TREE)
+        val changed = state.observe(cap)
+        val sig = cap.signature
         val showing = overlay?.isShowing() == true
         // Same content and the bubble is already up → nothing to do.
-        if (sig == lastSignature && showing) return
+        if (!changed && showing) return
         // Same content but the bubble is gone (killed by MIUI, or we left and came
         // back) → just put the bubble back, do NOT re-analyze (saves tokens/time).
-        if (sig == lastSignature && !showing) {
-            val cached = synchronized(resultCache) { resultCache[memKey(pkg, snapshot.title) + "#" + sig] }
+        if (!changed && !showing) {
+            val cached = synchronized(resultCache) { resultCache[cap.conv.key + "#" + sig] }
             main.post {
                 overlay?.showIdle(snapshot.title)
-                cached?.let { showResult(it, pkg, snapshot.title, sig) }
+                cached?.let { showResult(it, cap) }
+            }
+            // Left mid-generation and came back: that generation was retired and nothing is cached
+            // yet, so ask again the same way a fresh message would.
+            if (cached == null && snapshot.latestFrom == "other" && prefs.autoAnalyze) {
+                state.pend(cap)
+                main.removeCallbacks(debounce)
+                main.postDelayed(debounce, 1000)
             }
             return
         }
@@ -258,7 +276,6 @@ open class ChatCaptureService : AccessibilityService() {
         // app, or new content in this one) — leftover results from whatever was
         // shown before must not leak into it.
         main.post { overlay?.resetForNewConversation() }
-        lastSignature = sig
         Log.d(TAG, "snapshot[$pkg] title.len=${snapshot.title?.length ?: 0} n=${snapshot.messages.size} " +
             snapshot.messages.takeLast(6).joinToString(" | ") { "${it.side}:${it.text.length}" }) // sides + lengths only, never content
 
@@ -266,19 +283,19 @@ open class ChatCaptureService : AccessibilityService() {
         // no screenshots) so the prompt sees more than one screen of history.
         // Gated by "记录聊天历史": with the switch off, nothing about the chat
         // is written to disk at all (P0-A — the write used to run regardless).
-        val key = memKey(pkg, snapshot.title)
+        val key = cap.conv.key
         val bottom = isAtBottom(root)
         if (prefs.contextEnabled) {
             submit { runCatching { ChatMemory.get(this).merge(key, snapshot.messages, bottom) } }
         }
-        pendingSnapshot = snapshot
+        state.pend(cap)
 
         // Already generated for exactly this state (came back to the chat) → show it.
         val cached = synchronized(resultCache) { resultCache[key + "#" + sig] }
         if (cached != null) {
             main.post {
                 overlay?.showIdle(snapshot.title)
-                showResult(cached, pkg, snapshot.title, sig)
+                showResult(cached, cap)
             }
             return
         }
@@ -294,9 +311,7 @@ open class ChatCaptureService : AccessibilityService() {
     private fun adapterFor(pkg: String): ChatAppAdapter? =
         if (pkg == PKG_WECHAT) (if (prefs.wechatEnabled) wechatAdapter else null) else adapters[pkg]
 
-    private val wechatAdapter by lazy { WeChatAdapter() }
-
-    private fun memKey(pkg: String?, title: String?) = (pkg ?: "") + "|" + (title ?: "")
+    private val wechatAdapter get() = ChatAdapters.wechat
 
     /** Recent results, so switching away and back does not pay for a new call. */
     private val resultCache = object : LinkedHashMap<String, BilingualResult>(16, 0.75f, true) {
@@ -368,21 +383,24 @@ open class ChatCaptureService : AccessibilityService() {
     }
 
     private fun runAnalysis() {
-        val snapshot = pendingSnapshot ?: return
-        if (analyzing) return
+        val cap = state.pending ?: return
+        if (!prefs.hasReplyKey()) { main.post { overlay?.showError("未设置回复接口密钥，去设置里填") }; return }
         // Sprint 5 (D1): the Jev judgment mode is deleted; bilingual is the only
         // path. The old prefs.bilingualMode flag is deprecated and always true.
-        runBilingual(snapshot)
+        val req = state.begin(cap) ?: return  // this exact snapshot is already being generated
+        runBilingual(req)
     }
 
     /**
      * The one and only pipeline: a single reply-route round trip returns the
      * Chinese translation of the other side plus 3 target-language replies
      * with Chinese glosses; "填入" fills only the target-language text.
+     * The worker only sees the immutable [req]; when it comes back, only the
+     * generation the state still wants may touch the panel.
      */
-    private fun runBilingual(snapshot: ChatSnapshot) {
-        if (!prefs.hasReplyKey()) { main.post { overlay?.showError("未设置回复接口密钥，去设置里填") }; return }
-        analyzing = true
+    private fun runBilingual(req: GenerationRequest) {
+        val cap = req.captured
+        val snapshot = cap.snapshot
         // Sprint 7「换一条」闭环（有意的 prompt 产品决策变更）：上一轮被用户
         // 否定的已填入回复，这一轮生成要换角度。必须在 main.post{ showLoading() }
         // 之前取走——showLoading 会兜底清空否定列表。本函数跑在主线程，
@@ -393,9 +411,9 @@ open class ChatCaptureService : AccessibilityService() {
         // 这是用户上下文里落点最靠后的最小侵入注入点。
         val relBase = prefs.relationship
         val rel = if (reroll.isEmpty()) relBase else relBase + "\n" + reroll
-        val pkg = activePkg ?: ""
-        val key = memKey(pkg, snapshot.title)
-        val sig = snapshot.signature()
+        val pkg = cap.conv.pkg
+        val key = cap.conv.key
+        val sig = cap.signature
         val started = System.currentTimeMillis()
         submit {
             val ctx = try {
@@ -430,27 +448,24 @@ open class ChatCaptureService : AccessibilityService() {
             val raw = try {
                 ReplyClient(prefs).draftBilingual(snapshot, rel, ctx, transcript, style, propose, KbStore.isGroupTitle(snapshot.title))
             } catch (e: Exception) {
-                main.post { analyzing = false; if (isCurrent(key)) overlay?.showError(e.message ?: e.javaClass.simpleName) }
+                main.post { if (state.finish(req) && overlay?.isShowing() == true) overlay?.showError(e.message ?: e.javaClass.simpleName) }
                 return@submit
             }
             // 没要提议却带了候选（模型自作主张）就丢掉
             val result = if (propose) raw else raw.copy(relationCandidates = emptyList())
             Log.i(TAG, "bilingual: ${System.currentTimeMillis() - started}ms transcript=${transcript.size} style=${style.size}")
+            // Cached under the exact state it was made for, wanted or not: coming back to that
+            // state later shows it without a new call.
             synchronized(resultCache) { resultCache["$key#$sig"] = result }
             main.post {
-                analyzing = false
-                // The user may have left this chat while we were generating: keep the
-                // result in the cache, but never pop it up over a different chat.
-                if (isCurrent(key)) showResult(result, pkg, snapshot.title, sig)
-                // A newer message arrived mid-flight → go again for that one.
-                val next = pendingSnapshot
-                if (next != null && next.signature() != sig && next.latestFrom == "other" &&
-                    prefs.autoAnalyze && isCurrent(memKey(activePkg, next.title))) runAnalysis()
+                // Only the wanted generation may pop the panel: a newer message, another chat,
+                // or the panel going away already retired this one.
+                if (state.finish(req) && overlay?.isShowing() == true) showResult(result, cap)
             }
         }
     }
 
-    /** Conversations (memKey) that got a contact while their results were cached or
+    /** Conversations (ConversationRef.key) that got a contact while their results were cached or
      *  in flight: those results still carry candidates that must not be shown again. */
     private val relationSettled: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
@@ -459,9 +474,10 @@ open class ChatCaptureService : AccessibilityService() {
      * allows it and the title is usable. 建档 happens only in the pick callback,
      * i.e. after the user's tap.
      */
-    private fun showResult(result: BilingualResult, pkg: String?, title: String?, signature: String) {
-        val app = pkg ?: ""
-        val key = memKey(app, title)
+    private fun showResult(result: BilingualResult, cap: CapturedSnapshot) {
+        val app = cap.conv.pkg
+        val title = cap.conv.title
+        val key = cap.conv.key
         val bar = result.relationCandidates.isNotEmpty() && !title.isNullOrBlank() && !isTransientTitle(title) &&
             OverlayRules.shouldShowRelationBar(
                 // 缓存的结果可能早于建档（自己输入、菜单存档都不经过这里），以库里为准
@@ -504,7 +520,7 @@ open class ChatCaptureService : AccessibilityService() {
                 overlay?.toast("这个会话不再提示关系")
             }
         )
-        val target = FillTarget(app, title, signature)
+        val target = FillTarget(app, title, cap.signature, fromOcr = cap.source == SnapshotSource.OCR)
         overlay?.showBilingual(shown, { fillInput(it, target) }, actions)
     }
 
@@ -514,10 +530,6 @@ open class ChatCaptureService : AccessibilityService() {
     /** 合并推荐：名字或别名与 [title] 相同 / 互相包含的联系人，最多三个；只推荐，不合并。 */
     private fun similarContacts(title: String): List<Contact> =
         try { ContactMatch.similar(title, KbStore.get(this).contacts()) } catch (e: Exception) { emptyList() }
-
-    /** Whether the chat identified by [key] is the one on screen right now. */
-    private fun isCurrent(key: String): Boolean =
-        overlay?.isShowing() == true && memKey(activePkg, currentSnapshot?.title) == key
 
     // ------------------------------------------------------------------ OCR
 
@@ -529,7 +541,7 @@ open class ChatCaptureService : AccessibilityService() {
      */
     private fun ocrCaptureManual() {
         val root = rootInActiveWindow
-        val pkg = root?.packageName?.toString() ?: foregroundPkg ?: activePkg ?: ""
+        val pkg = root?.packageName?.toString() ?: foregroundPkg ?: state.activePkg ?: ""
         // WeChat is fully disabled: a manual "截屏识别一次" in WeChat must NOT take
         // a screenshot — just show the notice (a manual tap always shows it).
         if (pkg == PKG_WECHAT) { showWeChatDisabled(auto = false); return }
@@ -563,12 +575,11 @@ open class ChatCaptureService : AccessibilityService() {
      * the whole screen (everything else).
      */
     private fun ocrCapture(treeTitle: String?, rects: List<BubbleRect>, pkg: String, manual: Boolean) {
-        if (ocrBusy) return
-        ocrBusy = true
+        val ticket = state.ocrBegin(ConversationRef(pkg, treeTitle)) ?: return  // another pass is still open
         screenCapture.capture { res ->
             when (res) {
                 is ScreenCapture.Result.Failed -> {
-                    ocrBusy = false
+                    state.ocrEnd(ticket, null)
                     Log.i(TAG, "ocr: screenshot failed code=${res.code}")
                     // Nothing was read, so the signature must not claim this
                     // screen is done — the next event may retry, still held
@@ -589,15 +600,15 @@ open class ChatCaptureService : AccessibilityService() {
                         // rows next to the ones in the picture. Fall back to the
                         // old rects only if the tree gives us nothing now.
                         val fresh = rootInActiveWindow?.let { collectFeishuBubbleRects(it, resources) }
-                        ocrByRects(res.bitmap, if (fresh.isNullOrEmpty()) rects else fresh, treeTitle, pkg)
-                    } else ocrWholeScreen(res.bitmap, treeTitle, pkg, manual)
+                        ocrByRects(res.bitmap, if (fresh.isNullOrEmpty()) rects else fresh, treeTitle, pkg, ticket)
+                    } else ocrWholeScreen(res.bitmap, treeTitle, pkg, manual, ticket)
                 }
             }
         }
     }
 
     /** One OCR pass per bubble rectangle; each rect becomes exactly one message. */
-    private fun ocrByRects(bmp: Bitmap, rects: List<BubbleRect>, title: String?, pkg: String) {
+    private fun ocrByRects(bmp: Bitmap, rects: List<BubbleRect>, title: String?, pkg: String, ticket: OcrTicket) {
         val sx = ocr.scaleX; val sy = ocr.scaleY
         // Screen -> bitmap: drop the window origin first. A window shot does not
         // start at (0,0) in split screen or when it excludes the status bar.
@@ -614,21 +625,21 @@ open class ChatCaptureService : AccessibilityService() {
                 remaining--
                 if (remaining == 0) {
                     runCatching { bmp.recycle() }
-                    finishOcrSnapshot(ChatSnapshot(title, out.filterNotNull()), pkg, manual = false)
+                    finishOcrSnapshot(ChatSnapshot(title, out.filterNotNull()), pkg, manual = false, ticket)
                 }
             }
         }
     }
 
     /** Whole screen minus the top bar and the input area, grouped by line gaps. */
-    private fun ocrWholeScreen(bmp: Bitmap, treeTitle: String?, pkg: String, manual: Boolean) {
+    private fun ocrWholeScreen(bmp: Bitmap, treeTitle: String?, pkg: String, manual: Boolean, ticket: OcrTicket) {
         val region = Rect(0, (bmp.height * TOP_CROP).toInt(), bmp.width, (bmp.height * BOTTOM_CROP).toInt())
         ocr.recognize(bmp, region) { lines ->
             runCatching { bmp.recycle() }
             val msgs = groupOcrLines(lines)
             val title = treeTitle?.takeIf { it.isNotBlank() }
                 ?: lines.firstOrNull()?.text?.trim()?.take(24)
-            finishOcrSnapshot(ChatSnapshot(title, msgs, note = OCR_NOTE), pkg, manual)
+            finishOcrSnapshot(ChatSnapshot(title, msgs, note = OCR_NOTE), pkg, manual, ticket)
         }
     }
 
@@ -675,33 +686,47 @@ open class ChatCaptureService : AccessibilityService() {
         return t
     }
 
-    /** Shared tail of both OCR paths: dedupe, then analyze or park the bubble. */
-    private fun finishOcrSnapshot(snapshot: ChatSnapshot, pkg: String, manual: Boolean) {
-        ocrBusy = false
+    /** What is on screen right now, as far as the tree can tell (null = unknown). Lets a late OCR
+     *  callback find out that the conversation it was started for is gone. */
+    private fun liveRef(): ConversationRef? {
+        val root = rootInActiveWindow ?: return null
+        val pkg = root.packageName?.toString() ?: return null
+        val title = adapterFor(pkg)?.extract(root, resources)?.let { stabilizeTitle(pkg, it).title }
+            ?: findTitleInActionBar(root, Int.MAX_VALUE, resources.displayMetrics.widthPixels, resources, 0.15, 0.85)
+        return ConversationRef(pkg, title)
+    }
+
+    /** Shared tail of both OCR paths: drop a stale pass, dedupe, then analyze or park the bubble. */
+    private fun finishOcrSnapshot(snapshot: ChatSnapshot, pkg: String, manual: Boolean, ticket: OcrTicket) {
+        // Always ends the pass. Stale = the conversation changed, the chat window was left or the
+        // assistant went off while the screenshot and the OCR were running.
+        if (!state.ocrEnd(ticket, liveRef())) {
+            Log.i(TAG, "ocr[$pkg] dropped: conversation changed meanwhile")
+            if (!manual) lastOcrSignature = ""  // nothing was read for the current screen: let the next event retry
+            else overlay?.toast("会话已切换，请再点一次截屏识别")
+            return
+        }
         // Counts only — OCR'd chat text never goes to logcat.
         Log.i(TAG, "ocr[$pkg] msgs=${snapshot.messages.size} manual=$manual")
         if (snapshot.messages.isEmpty()) {
             if (manual) overlay?.showError("这一屏没认出文字")
             return
         }
-        if (!prefs.isAllowed(snapshot.title)) { overlay?.hide(); return }
+        if (!prefs.isAllowed(snapshot.title)) { hideOverlay(); return }
 
-        if (pkg.isNotEmpty() && pkg != activePkg) { activePkg = pkg; lastSignature = "" }
-        currentSnapshot = snapshot
-        val sig = snapshot.signature()
+        val cap = CapturedSnapshot(ConversationRef(pkg, snapshot.title), snapshot, SnapshotSource.OCR)
         // Manual taps always re-run; the automatic path dedupes like the tree path.
-        if (!manual && sig == lastSignature) {
+        if (!state.observe(cap, force = manual)) {
             if (overlay?.isShowing() != true) overlay?.showIdle(snapshot.title)
             return
         }
         // Same rule as the tree path: past this point the conversation is either
         // new or being force-refreshed, so drop whatever was shown before.
         overlay?.resetForNewConversation()
-        lastSignature = sig
 
         val auto = prefs.ocrAutoAnalyze && prefs.autoAnalyze && snapshot.latestFrom == "other"
         if (manual || auto) {
-            pendingSnapshot = snapshot
+            state.pend(cap)
             main.removeCallbacks(debounce)
             runAnalysis()
         } else {
@@ -731,6 +756,13 @@ open class ChatCaptureService : AccessibilityService() {
      * instead and the user pastes it by hand.
      */
     private fun fillInput(text: String, target: FillTarget) {
+        // Copy-only: an OCR-derived candidate, or an app whose adapter cannot prove the conversation
+        // (ChatAppAdapter.fillSupport), is never typed into a box, whatever the screen shows now.
+        if (target.fromOcr || adapterFor(target.pkg)?.fillSupport != FillSupport.FRESH_VERIFIED) {
+            copyToClipboard(text)
+            overlay?.snackbar("这个会话无法核对，没有自动填入；回复已复制，长按输入框粘贴")
+            return
+        }
         submit {
             var refused = false
             // Fast path: SET_TEXT works when the box already has input focus and no
@@ -835,6 +867,7 @@ open class ChatCaptureService : AccessibilityService() {
         super.onDestroy()
         // Tear the overlay down and cut its callback so a stale button tap can
         // never call back into this dead instance.
+        state.invalidate()
         overlay?.onManualAnalyze = null
         overlay?.onSaveContact = null
         overlay?.onOcrCapture = null

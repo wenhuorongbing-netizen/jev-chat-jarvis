@@ -42,25 +42,24 @@ class FillGuardTest {
     }
 
     @Test
-    fun `missing title on screen is allowed only when the visible messages match`() {
-        assertEquals(FillVerdict.ALLOW, check(targetA, "com.tencent.mobileqq", snap(null, "在吗", "明天见面吗")))
-        assertEquals(FillVerdict.DENY_UNVERIFIED, check(targetA, "com.tencent.mobileqq", snap(null, "别的会话")))
+    fun `an unreadable title on screen is denied even when the visible messages match`() {
+        // Re-judged in S2: matching messages never stand in for a title (same rule as Windows).
+        assertEquals(FillVerdict.DENY_TITLE, check(targetA, "com.tencent.mobileqq", snap(null, "在吗", "明天见面吗")))
+        assertEquals(FillVerdict.DENY_TITLE, check(targetA, "com.tencent.mobileqq", snap("连接中…", "在吗", "明天见面吗")))
     }
 
     @Test
-    fun `transient title on screen falls back to the message signature`() {
-        val connecting = snap("连接中…", "在吗", "明天见面吗")
-        assertEquals(FillVerdict.ALLOW, check(targetA, "com.tencent.mobileqq", connecting))
-        assertEquals(FillVerdict.DENY_UNVERIFIED, check(targetA, "com.tencent.mobileqq", snap("连接中…", "x")))
-    }
-
-    @Test
-    fun `target without a usable title needs a non-empty matching signature`() {
+    fun `a target without a usable title is denied even when the messages match`() {
         val untitled = FillTarget("com.tencent.mobileqq", null, chatA.signature())
-        assertEquals(FillVerdict.ALLOW, check(untitled, "com.tencent.mobileqq", snap("小王", "在吗", "明天见面吗")))
-        assertEquals(FillVerdict.DENY_UNVERIFIED, check(untitled, "com.tencent.mobileqq", snap("小王", "换了")))
-        val blindEmpty = FillTarget("com.tencent.mobileqq", null, "")
-        assertEquals(FillVerdict.DENY_UNVERIFIED, check(blindEmpty, "com.tencent.mobileqq", snap(null)))
+        assertEquals(FillVerdict.DENY_TITLE, check(untitled, "com.tencent.mobileqq", snap("小王", "在吗", "明天见面吗")))
+        assertEquals(FillVerdict.DENY_TITLE, check(untitled, "com.tencent.mobileqq", snap(null)))
+    }
+
+    @Test
+    fun `an OCR-derived candidate is never filled, not even when a tree read happens to match`() {
+        val ocr = targetA.copy(fromOcr = true)
+        assertEquals(FillVerdict.DENY_OCR_ONLY, check(ocr, "com.tencent.mobileqq", chatA))
+        assertEquals(FillVerdict.DENY_OCR_ONLY, check(ocr, "com.other", null))
     }
 
     @Test
