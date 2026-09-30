@@ -770,7 +770,7 @@ open class ChatCaptureService : AccessibilityService() {
                 // truth: success only after a verified write/paste. (The reply
                 // card's tap handler no longer pre-announces success.)
                 if (ok) overlay?.snackbar("已填入，确认后自己发送")
-                else if (refused) { copyToClipboard(text); overlay?.snackbar("当前已不是这个会话，没有填入；回复已复制") }
+                else if (refused) { copyToClipboard(text); overlay?.snackbar("无法确认还是这个会话（切换或有新消息），没有填入；回复已复制") }
                 else { copyToClipboard(text); overlay?.snackbar("已复制，长按输入框粘贴") }
             }
         }

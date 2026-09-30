@@ -3,8 +3,8 @@ package com.jev.probe.core
 /**
  * Which conversation a candidate reply was generated for. Captured when the
  * result is shown, checked again right before every write into an input box.
- * A title is only an attribute of a conversation, not its identity — when it is
- * missing or transient the visible-message [signature] has to vouch instead.
+ * A title is only an attribute of a conversation, not its identity — the
+ * visible-message [signature] has to match as well, always.
  */
 data class FillTarget(val pkg: String, val title: String?, val signature: String)
 
@@ -37,11 +37,11 @@ object FillGuard {
 
         val wanted = target.title?.trim()
         val seen = live.title?.trim()
-        if (isUsableTitle(wanted) && isUsableTitle(seen)) {
-            return if (wanted == seen) FillVerdict.ALLOW else FillVerdict.DENY_TITLE
-        }
-        // A title is missing on one side (OCR-only, transient placeholder): the
-        // messages on screen must be the same ones the candidate was written for.
+        if (isUsableTitle(wanted) && isUsableTitle(seen) && wanted != seen) return FillVerdict.DENY_TITLE
+        // A title is only a label (two chats can share one), so it never proves
+        // the conversation on its own: the visible messages must also be the ones
+        // the candidate was written for. Scrolling or a new message means a
+        // refusal and a copy — a false refusal is fine, a false fill is not.
         if (target.signature.isNotEmpty() && target.signature == live.signature()) return FillVerdict.ALLOW
         return FillVerdict.DENY_UNVERIFIED
     }

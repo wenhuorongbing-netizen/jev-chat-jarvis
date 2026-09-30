@@ -65,8 +65,32 @@ class FillGuardTest {
 
     @Test
     fun `title comparison ignores surrounding whitespace only`() {
-        assertEquals(FillVerdict.ALLOW, check(targetA, "com.tencent.mobileqq", snap(" 小王 ", "另一条")))
+        assertEquals(FillVerdict.ALLOW, check(targetA, "com.tencent.mobileqq", snap(" 小王 ", "在吗", "明天见面吗")))
         assertEquals(FillVerdict.DENY_TITLE, check(targetA, "com.tencent.mobileqq", snap("小王2", "在吗", "明天见面吗")))
+    }
+
+    @Test
+    fun `same title alone is not proof - another chat with the same name is denied`() {
+        val otherChatSameName = snap("小王", "完全不同的另一个会话")
+        assertEquals(FillVerdict.DENY_UNVERIFIED, check(targetA, "com.tencent.mobileqq", otherChatSameName))
+    }
+
+    @Test
+    fun `same title but a new message arrived is denied`() {
+        val newer = ChatSnapshot("小王", chatA.messages + Msg("other", "在不在"))
+        assertEquals(FillVerdict.DENY_UNVERIFIED, check(targetA, "com.tencent.mobileqq", newer))
+    }
+
+    @Test
+    fun `same title but the target carries no signature is denied`() {
+        val unsigned = FillTarget("com.tencent.mobileqq", "小王", "")
+        assertEquals(FillVerdict.DENY_UNVERIFIED, check(unsigned, "com.tencent.mobileqq", chatA))
+        assertEquals(FillVerdict.DENY_UNVERIFIED, check(unsigned, "com.tencent.mobileqq", snap("小王")))
+    }
+
+    @Test
+    fun `adapter sees an empty tree - OCR-only chat - never matches, so it copies`() {
+        assertEquals(FillVerdict.DENY_UNVERIFIED, check(targetA, "com.tencent.mobileqq", snap("小王")))
     }
 
     @Test

@@ -207,8 +207,13 @@ internal object ReplyParser {
     fun parseBilingual(content: String): BilingualResult {
         val start = content.indexOf('{')
         val end = content.lastIndexOf('}')
-        if (start < 0 || end <= start) throw IllegalStateException("模型没有返回 JSON：${content.take(80)}")
-        val obj = JSONObject(content.substring(start, end + 1))
+        // Model output can quote the chat back; no message here may carry any of it.
+        if (start < 0 || end <= start) throw IllegalStateException("模型没有返回 JSON")
+        val obj = try {
+            JSONObject(content.substring(start, end + 1))
+        } catch (_: org.json.JSONException) {
+            throw IllegalStateException("模型返回的 JSON 无法解析")
+        }
         val arr = obj.optJSONArray("replies") ?: JSONArray()
         val replies = ArrayList<RankedReply>()
         for (i in 0 until arr.length()) {

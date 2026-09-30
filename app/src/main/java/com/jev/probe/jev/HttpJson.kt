@@ -17,36 +17,32 @@ object Route {
 }
 
 /**
- * Carries the route, the HTTP status (null = transport failure) and the first
- * 120 chars of the response body so the settings page can show the real reason.
+ * Carries the route, the HTTP status (null = transport failure) and a fixed,
+ * locally written [hint]. The provider's response body is never read into it:
+ * error text ends up in the overlay and in crash files, and a third party can
+ * echo the key or the chat back in a body, which no redaction rule can promise
+ * to catch.
  */
 class ApiException(
     val route: String,
     val status: Int?,
-    val snippet: String
-) : RuntimeException(buildMessage(route, status, snippet)) {
+    val hint: String
+) : RuntimeException(buildMessage(route, status, hint)) {
 
     companion object {
-        fun buildMessage(route: String, status: Int?, snippet: String): String {
-            val safe = Redact.secrets(snippet).take(120)
-            return if (status != null) "$route HTTP $status：$safe" else "$route 请求失败：$safe"
+        fun buildMessage(route: String, status: Int?, hint: String): String =
+            if (status != null) "$route HTTP $status：$hint" else "$route 请求失败：$hint"
+
+        /** What a user can do about an HTTP status. Text is ours, never the server's. */
+        fun hintFor(status: Int): String = when (status) {
+            401, 403 -> "密钥被拒，请检查该接口的密钥"
+            404 -> "地址或模型名不对"
+            400, 422 -> "请求被拒绝，请检查模型名和接口地址"
+            402 -> "账户余额或额度不足"
+            429, 529 -> "服务繁忙，已重试"
+            in 500..599 -> "服务端出错，请稍后再试"
+            else -> "请求没有成功"
         }
-    }
-}
-
-/**
- * Error bodies are shown in the overlay and can end up in a crash file, and some
- * providers echo the offending key back ("Incorrect API key provided: sk-…").
- * Whatever key-shaped text or the literal key in use is masked before it can
- * leave the HTTP layer.
- */
-object Redact {
-    private val KEYISH = Regex("""(?i)bearer\s+[A-Za-z0-9._\-]{8,}|\bsk-[A-Za-z0-9_\-]{6,}""")
-
-    fun secrets(text: String, key: String = ""): String {
-        val literal = key.trim()
-        val masked = if (literal.length >= 6) text.replace(literal, "***") else text
-        return KEYISH.replace(masked, "***")
     }
 }
 
@@ -88,20 +84,14 @@ object HttpJson {
                 conn.outputStream.use { os: OutputStream -> os.write(bytes) }
                 val code = conn.responseCode
                 if (code == 429 || code == 529) {
-                    last = ApiException(route, code, "服务繁忙，已重试")
+                    last = ApiException(route, code, ApiException.hintFor(code))
                     attempt++
                     if (attempt < MAX_ATTEMPTS) Thread.sleep(500L * (1L shl attempt))
                     continue
                 }
-                // Branch on the status code FIRST. Reading the body must never be
-                // able to lose it: errorStream is null on some failures (and on
-                // some OEM stacks), and a read can throw on a truncated response —
-                // either way this used to surface as a transport failure with no
-                // status, which then got retried even for a 401.
-                if (code !in 200..299) {
-                    val errText = readBody(conn.errorStream)
-                    throw ApiException(route, code, Redact.secrets(errText, key).ifBlank { "（响应体为空）" })
-                }
+                // Branch on the status code FIRST, and do not read an error body at
+                // all: only the status and our own hint go into the exception.
+                if (code !in 200..299) throw ApiException(route, code, ApiException.hintFor(code))
                 val text = readBody(conn.inputStream)
                 if (text.isBlank()) throw ApiException(route, code, "响应体为空")
                 return JSONObject(text)
@@ -137,9 +127,7 @@ object HttpJson {
                 headersFor(url).forEach { (k, v) -> setRequestProperty(k, v) }
             }
             val code = conn.responseCode
-            if (code !in 200..299) {
-                throw ApiException(route, code, Redact.secrets(readBody(conn.errorStream), key).ifBlank { "（响应体为空）" })
-            }
+            if (code !in 200..299) throw ApiException(route, code, ApiException.hintFor(code))
             return readBody(conn.inputStream)
         } catch (e: ApiException) {
             throw e
@@ -164,15 +152,19 @@ object HttpJson {
             mapOf("HTTP-Referer" to "https://jev-assistant.local", "X-Title" to "Jev Assistant")
         else emptyMap()
 
-    /** Human-readable transport failures (no key material ever appears here). */
+    /**
+     * Human-readable transport failures. Only known causes get a sentence; anything
+     * else is the exception's class name, never its message (a JSON parse failure
+     * message quotes the response text).
+     */
     private fun describe(e: Exception): String {
-        val m = e.message ?: e.javaClass.simpleName
+        val m = e.message ?: ""
         return when {
             m.contains("timed out") || m.contains("timeout", true) -> "网络超时，请检查连接"
             m.contains("Unable to resolve host") -> "域名解析失败，地址填错或无网络"
             m.contains("Failed to connect") || m.contains("ECONNREFUSED") -> "无法连接该地址"
             m.contains("CertPath") || m.contains("SSL") -> "HTTPS 证书校验失败"
-            else -> m
+            else -> e.javaClass.simpleName
         }
     }
 }
