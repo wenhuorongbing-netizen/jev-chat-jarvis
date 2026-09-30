@@ -1,6 +1,6 @@
 # Image bubble sampling: QQ, WhatsApp, WeChat (issue #7, partial)
 
-Date: 2026-09-30. Sampled over adb (`uiautomator dump`). The only messages sent were one neutral image (a screenshot of the Android settings page) to the owner's own accounts: WhatsApp "message yourself" and QQ "我的电脑". Nothing was sent to any other person or group.
+Date: 2026-09-30. Sampled over adb (`uiautomator dump`). The only messages sent were one neutral image (a screenshot of the Android settings page) to the owner's own accounts: WhatsApp "message yourself" and QQ "我的电脑". Nothing was sent to any other person or group. A later pass on phone B only read an existing QQ chat (nothing was sent).
 
 ## Devices
 
@@ -31,12 +31,23 @@ Samples (sanitised: every `text` blanked; every `content-desc` blanked except fi
 - **Image sent via the system share sheet arrives as a file-with-preview**, not as a picture message: `ImageView id/mi2` (`NAF=true`, `content-desc=""`), and a sibling `LinearLayout id/mi5` whose `content-desc` is `<file name><size>`. It is right-aligned: `mi2` `[750,1389][1092,2131]`, body container `p2r` `[728,1367][1114,2153]`. This is **not** the same node as the plain picture bubble on 9.3.10 (`mkb`, `content-desc="图片"`).
 - Regular files use `id/wdt` with `id/kbs` (name), `id/k73` (size), `ImageView id/ufs` (`content-desc="file icon"`).
 
+### Plain pictures sent by me, and a sticker — QQ 9.3.65, `qq_965_self_pictures.xml`
+
+Taken from an existing one-to-one chat on phone B (read-only: nothing was sent, and the chat's text, names and timestamps are blanked in the sample; the other person's avatar description is replaced by `对方的资料卡`).
+
+- **Picture bubble: `ImageView`, `content-desc="图片"`, `clickable=true`.** On 9.3.65 the id is **not** `mkb` any more (0 hits). It is `id/mkj` in one row and **empty** in another, so the id cannot be the key. Class + description is the feature that survives 9.3.10 -> 9.3.65.
+- **A sticker shares the picture's id.** The animated sticker is `ImageView id/mkj`, `content-desc="表情[动画表情]"`, `[656,312][1088,635]`. Do not match on `mkj` alone; match the description `图片`, and treat `表情[...]` as a sticker.
+- **Bounds:** the ImageView is the picture itself: `[241,915][983,1334]` (no id) and `[346,2152][1088,2395]` (`mkj`) on a 1280-wide screen.
+- **A picture with a text node under it** (probably a caption; the text is blanked in the sample, so this is inferred from the layout): a clickable id-less `LinearLayout [180,854][1114,1546]` holds the `图片` ImageView `[241,915][983,1334]` and, below it, `TextView id/mjn [180,1334][1114,1546]`. That LinearLayout is the innermost of four nodes with identical bounds (`p2q` LinearLayout with an id, a ViewGroup, a View, then this one). So `mjn` (the text id) can sit in a picture's bubble. A text-only adapter would read it as an ordinary message, and the picture above it is only found through the ImageView.
+- **Mine vs theirs:** my avatar is `FrameLayout content-desc="我的资料卡"` at `[1114,y][1242,...]` (right edge, always 128 px wide; 128 px tall except the first row, `[1114,292][1242,362]`, which is cut off by the top of the list). The picture's row ends at x=1114 (body container `p2q` `[320,2126][1114,2421]`) so the bubble sits against the avatar on the right. The other side's avatar is at `[38,1687][166,1815]` on the left and its description ends in `的资料卡` (not equal to `我的资料卡`).
+- Row layout: one `root` row (e.g. `[0,661][1280,1546]`) contains three siblings: the time `id/f24` `[531,661][750,777]`, the name row `id/wtb` > `id/mjq` `[729,802][1089,854]`, and the body container `id/p2q` `[180,854][1114,1546]`. So the time, the name and the picture can all be in the same row; do not use "row contains no picture" to find a time row, look at the `f24` node itself.
+
 ### Not verified for QQ
 
-- A plain picture message sent by me (`mkb` or `mi2`-style?) and on the right side. The sample above is a file bubble.
-- Whether `mkb` (9.3.10) still exists on 9.3.65 and 9.3.50.
-- Stickers, GIFs, forwarded pictures.
-- Anything on the 小米 14 with QQ 9.3.50.
+- A **received** picture on 9.3.65 (the samples cover received on 9.3.10 and sent on 9.3.65; only the id and layout differ by version, but a left-side `图片` on 9.3.65 was not seen).
+- Whether the same features hold on QQ 9.3.50, the target's version.
+- GIFs, forwarded pictures, albums of several pictures, group chats on 9.3.65.
+- Anything on the 小米 14.
 
 ## WhatsApp — sent picture in a self chat, `whatsapp_self_image.xml`
 
