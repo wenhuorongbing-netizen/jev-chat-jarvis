@@ -8,11 +8,14 @@ plugins {
 
 // Release signing: reads a properties file kept OUTSIDE the repo
 // (storeFile / storePassword / keyAlias / keyPassword). Override the path with
-// the JEV_KEYSTORE_PROPS env var. Without it, release builds are unsigned.
+// the JEV_KEYSTORE_PROPS env var. Without it a local release build falls back to
+// the debug key (see buildTypes.release); a build meant to be published sets
+// JEV_REQUIRE_RELEASE_KEY=1 and then fails instead of falling back (gate below).
 val releaseProps = Properties().apply {
     val f = file(System.getenv("JEV_KEYSTORE_PROPS") ?: "H:/android/keys/jev-release.properties")
     if (f.exists()) FileInputStream(f).use { load(it) }
 }
+val requireReleaseKey = System.getenv("JEV_REQUIRE_RELEASE_KEY") == "1"
 
 android {
     namespace = "com.jev.probe"
@@ -76,6 +79,21 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
+    }
+}
+
+// Publish gate: with JEV_REQUIRE_RELEASE_KEY=1, building a release artifact without the
+// real release key is an error, never a silent debug-signed "release".
+gradle.taskGraph.whenReady {
+    val releaseArtifact = allTasks.any {
+        it.project == project && Regex("^(assemble|bundle|package)Release$").matches(it.name)
+    }
+    if (requireReleaseKey && releaseArtifact && android.signingConfigs.findByName("release") == null) {
+        throw GradleException(
+            "JEV_REQUIRE_RELEASE_KEY=1 but no release signing config: set JEV_KEYSTORE_PROPS to a " +
+                "properties file with storeFile/storePassword/keyAlias/keyPassword. Refusing to build a " +
+                "debug-signed release."
+        )
     }
 }
 

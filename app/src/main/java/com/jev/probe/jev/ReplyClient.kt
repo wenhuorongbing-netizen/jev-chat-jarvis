@@ -217,16 +217,27 @@ internal object ReplyParser {
         val arr = obj.optJSONArray("replies") ?: JSONArray()
         val replies = ArrayList<RankedReply>()
         for (i in 0 until arr.length()) {
-            val r = arr.optJSONObject(i) ?: continue
-            val text = r.optString("text").trim()
-            if (text.isNotEmpty()) replies.add(RankedReply(text, 0.0, r.optString("zh").trim()))
+            // A reply is {text, zh} or a bare string (contracts/jev/v1/reply_parse.json).
+            val r = arr.opt(i)
+            val (text, zh) = when (r) {
+                is JSONObject -> textOf(r, "text") to textOf(r, "zh")
+                is String -> r.trim() to ""
+                else -> continue
+            }
+            if (text.isNotEmpty()) replies.add(RankedReply(text, 0.0, zh))
         }
         if (replies.isEmpty()) throw IllegalStateException("模型没有给出候选回复")
         return BilingualResult(
-            obj.optString("translation").trim(), replies.take(3),
-            lang = obj.optString("lang").trim(), analysis = obj.optString("analysis").trim(),
+            textOf(obj, "translation"), replies.take(3),
+            lang = textOf(obj, "lang"), analysis = textOf(obj, "analysis"),
             relationCandidates = parseRelations(obj.optJSONArray("relations"))
         )
+    }
+
+    /** Trimmed string field; a missing or JSON-null value is empty, never the word "null". */
+    private fun textOf(o: JSONObject, key: String): String {
+        val v = o.opt(key)
+        return if (v == null || v == JSONObject.NULL) "" else v.toString().trim()
     }
 
     /** A relation is a few words, not a sentence. */

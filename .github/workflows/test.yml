@@ -1,0 +1,32 @@
+name: test
+
+# 每次推送 / PR 跑 JVM 单测 + 编 debug 包；release.yml 出正式包前也复用这一份（workflow_call）。
+# 不需要任何 key、不需要签名文件。
+on:
+  push:
+    branches: ['**']  # tag 推送由 release.yml 复用本文件跑，这里不重复跑
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'  # 跟 CLAUDE.md 一致：JDK 17
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: JVM 单元测试（含 contracts/jev/v1 的契约向量）
+        run: ./gradlew testDebugUnitTest --console=plain
+
+      - name: 编 debug 包
+        run: ./gradlew assembleDebug --console=plain

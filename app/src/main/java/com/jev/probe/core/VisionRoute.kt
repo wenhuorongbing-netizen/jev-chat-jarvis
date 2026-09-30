@@ -40,11 +40,19 @@ object VisionRoute {
 
     private fun hostOf(url: String): String? = uriOf(url)?.host?.lowercase()?.ifBlank { null }
 
+    /** Only http and https are origins (contracts/jev/v1/origin.json); anything else never matches. */
     private fun originOf(url: String): Triple<String, String, Int>? {
         val u = uriOf(url) ?: return null
-        val scheme = u.scheme?.lowercase() ?: return null
+        val scheme = u.scheme?.lowercase()?.takeIf { it == "http" || it == "https" } ?: return null
         val host = hostOf(url) ?: return null
-        val port = if (u.port != -1) u.port else if (scheme == "https") 443 else if (scheme == "http") 80 else -1
+        val port = if (u.port != -1) u.port else if (scheme == "https") 443 else 80
         return Triple(scheme, host, port)
+    }
+
+    /** `scheme://host[:port]` with the default port omitted, or null when [url] has no origin. */
+    fun originString(url: String): String? {
+        val (scheme, host, port) = originOf(url) ?: return null
+        val isDefault = port == (if (scheme == "https") 443 else 80)
+        return "$scheme://$host" + if (isDefault) "" else ":$port"
     }
 }
