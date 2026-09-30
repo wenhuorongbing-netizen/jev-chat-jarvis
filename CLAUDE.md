@@ -49,8 +49,8 @@
 | 目录 | 归属 | 说明 |
 |---|---|---|
 | `app/`、`gradle/`、根 gradle 文件 | Android 构建方 | 安卓工程 |
-| `tools/jev/` | Jev 判断方 | Python 题目集与校准脚手架，PC 上跑 |
-| `docs/` | 主控 | 验收标准、报告 |
+| `tools/` | 主控 | 真机回归 shell 脚本与「Jev 已删除」门禁（`check_no_jev.sh`） |
+| `docs/` | 主控 | 设计文档、PO 裁决（`po-handoff/`）、ADR |
 | `docs/v1.3-plan.md` | 主控 | v1.3 总方案与修订，**所有 worker 必读** |
 | `_reports/` | 所有人 | 每个任务的交付报告写这里 |
 
