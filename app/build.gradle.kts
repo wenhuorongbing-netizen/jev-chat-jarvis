@@ -1,3 +1,4 @@
+import java.io.File
 import java.io.FileInputStream
 import java.util.Properties
 
@@ -12,7 +13,7 @@ plugins {
 // the debug key (see buildTypes.release); a build meant to be published sets
 // JEV_REQUIRE_RELEASE_KEY=1 and then fails instead of falling back (gate below).
 val releaseProps = Properties().apply {
-    val f = java.io.File(System.getenv("JEV_KEYSTORE_PROPS") ?: "H:/android/keys/jev-release.properties")  // plain File: Gradle file() rejects "H:/..." on Linux CI
+    val f = File(System.getenv("JEV_KEYSTORE_PROPS") ?: "H:/android/keys/jev-release.properties")  // plain File: Gradle file() rejects "H:/..." on Linux CI
     if (f.exists()) FileInputStream(f).use { load(it) }
 }
 val requireReleaseKey = System.getenv("JEV_REQUIRE_RELEASE_KEY") == "1"
