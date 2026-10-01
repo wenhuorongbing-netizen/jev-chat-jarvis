@@ -98,6 +98,12 @@ class OverlayController(private val ctx: Context) {
     /** Bubble menu → one manual screenshot + OCR of whatever app is open. */
     var onOcrCapture: (() -> Unit)? = null
 
+    /** Bubble menu → send the newest picture with one reply request. */
+    var onImageReply: (() -> Unit)? = null
+
+    /** Label of the picture entry, asked each time the menu opens; null = no entry. */
+    var imageMenuLabel: () -> String? = { null }
+
     /** How much knowledge context the last analysis actually used. */
     private var ctxNotes = 0
     private var ctxHistory = 0
@@ -508,6 +514,7 @@ class OverlayController(private val ctx: Context) {
             toast(if (auto) "已关闭：点气泡才生成" else "已开启：来新消息就在后台生成")
         })
         menu.addView(menuItem("截屏识别") { dismissMenu { onOcrCapture?.invoke() } })
+        imageMenuLabel()?.let { label -> menu.addView(menuItem(label) { dismissMenu { onImageReply?.invoke() } }) }
         menu.addView(menuItem("设置") { dismissMenu { openSettings() } })
         menu.addView(menuItem("隐藏") { dismissMenu { hide() } })
         // 位置钳制：气泡在屏上 2/3 → 菜单放下方；在下 1/3 → 窗口上移、菜单长到气泡上方

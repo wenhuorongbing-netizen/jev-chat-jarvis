@@ -189,6 +189,11 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         get() = sp.getBoolean(K_OCR_FALLBACK, true)
         set(v) = sp.edit().putBoolean(K_OCR_FALLBACK, v).apply()
 
+    /** The owner switch for sending the latest picture to the reply model (manual, one chat at a time). */
+    var imageReplyEnabled: Boolean
+        get() = sp.getBoolean(K_IMAGE_REPLY, true)
+        set(v) = sp.edit().putBoolean(K_IMAGE_REPLY, v).apply()
+
     /** Auto-analyze in OCR mode (default off: OCR costs a screenshot each time). */
     var ocrAutoAnalyze: Boolean
         get() = sp.getBoolean(K_OCR_AUTO, false)
@@ -373,6 +378,7 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         private const val K_OCR_UNKNOWN = "ocr_unknown_apps"
         private const val K_OCR_FALLBACK = "ocr_fallback"
         private const val K_OCR_AUTO = "ocr_auto_analyze"
+        private const val K_IMAGE_REPLY = "image_reply_enabled"
         private const val K_REL = "relationship"
         private const val K_ENABLED = "enabled"
         private const val K_WHITELIST = "whitelist"

@@ -330,6 +330,11 @@ class SettingsActivity : AppCompatActivity() {
         }
         card2.addView(ocrAutoRow)
         card2.addView(text("关闭时 OCR 认完只亮悬浮球，点一下再分析。", 11f, sub))
+        val imageRow = toggleRow("允许把对方发的图片发给回复模型", prefs.imageReplyEnabled) { on ->
+            prefs.imageReplyEnabled = on
+        }
+        card2.addView(imageRow)
+        card2.addView(text("只在你点悬浮球菜单里的「识别图片」时才发，发一张裁好的图，只在内存里，不落盘、不进历史。关闭后图片不会离开手机。", 11f, sub))
 
         // --- 知识库 ---
         card2.addView(cardBtn("知识库与联系人") {

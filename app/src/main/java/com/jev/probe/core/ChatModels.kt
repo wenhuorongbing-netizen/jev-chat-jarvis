@@ -28,13 +28,19 @@ data class ChatSnapshot(
     val title: String?,
     val messages: List<Msg>,
     val bubbleRects: List<BubbleRect> = emptyList(),
-    val note: String? = null
+    val note: String? = null,
+    /** The newest message row, when it is a picture whose whole bubble is on screen (S5). */
+    val latestImage: ImageBubble? = null,
+    /** How many picture rows end the visible list; the picture has no message id, so a second
+     *  one arriving (or the first one leaving) changes this and with it [signature]. */
+    val trailingImages: Int = 0
 ) {
     val latestFrom: String? get() = messages.lastOrNull()?.side
 
     /** A stable signature of the last few messages, to detect real changes. */
     fun signature(): String =
-        messages.takeLast(6).joinToString("|") { "${it.side}:${it.text}" }
+        messages.takeLast(6).joinToString("|") { "${it.side}:${it.text}" } +
+            if (trailingImages > 0) "|img:$trailingImages" else ""
 }
 
 /** [zh] is the Chinese gloss shown under a foreign-language reply in bilingual
@@ -49,5 +55,7 @@ data class BilingualResult(
     val lang: String = "",
     val analysis: String = "",
     /** 关系提议的三个候选；空 = 没有提议（没要、缺失或格式不对）。 */
-    val relationCandidates: List<String> = emptyList()
+    val relationCandidates: List<String> = emptyList(),
+    /** What the request did with the picture; [ImageUse.NONE] when it had none. */
+    val imageUse: ImageUse = ImageUse.NONE
 )

@@ -20,13 +20,18 @@ import com.jev.probe.core.ConversationRef
 import com.jev.probe.core.ConversationState
 import com.jev.probe.core.ChatMemory
 import com.jev.probe.core.ChatSnapshot
+import com.jev.probe.core.EphemeralImage
 import com.jev.probe.core.FillGuard
 import com.jev.probe.core.FillSupport
 import com.jev.probe.core.FillTarget
 import com.jev.probe.core.FillVerdict
 import com.jev.probe.core.GenerationRequest
+import com.jev.probe.core.ImageCrop
+import com.jev.probe.core.ImageSession
+import com.jev.probe.core.ImageUse
 import com.jev.probe.core.Msg
 import com.jev.probe.core.OcrTicket
+import com.jev.probe.core.PixelBox
 import com.jev.probe.core.Prefs
 import com.jev.probe.core.SnapshotSource
 import com.jev.probe.core.kb.Contact
@@ -117,7 +122,7 @@ open class ChatCaptureService : AccessibilityService() {
         prefs = Prefs(this)
         overlay = OverlayController(this)
         overlay?.onManualAnalyze = {
-            state.current?.let { state.pend(it); runAnalysis() }
+            state.current?.let { state.pend(it); userAsked = true; runAnalysis() }
         }
         // Bubble menu: file the open conversation as a knowledge-base contact.
         // Contacts are never created automatically — this is the one-tap way in.
@@ -139,6 +144,9 @@ open class ChatCaptureService : AccessibilityService() {
         }
         // Bubble menu: one manual screenshot + OCR, for any app at all.
         overlay?.onOcrCapture = { ocrCaptureManual() }
+        // Bubble menu: send the newest picture of the open chat along with one reply request.
+        overlay?.imageMenuLabel = { imageMenuLabel() }
+        overlay?.onImageReply = { imageReplyManual() }
         // Keep the process at foreground importance so MIUI does not freeze us.
         runCatching { KeepAliveService.start(this) }
         // Load the bundled OCR model now, off the main thread: the first
@@ -203,6 +211,7 @@ open class ChatCaptureService : AccessibilityService() {
      *  comes back after the panel was dismissed (left the chat, assistant off) must not revive it. */
     private fun hideOverlay() {
         state.invalidate()
+        endImageSession()
         main.removeCallbacks(debounce)
         main.post { overlay?.hide() }
     }
@@ -252,6 +261,7 @@ open class ChatCaptureService : AccessibilityService() {
         // retires any generation still running for the previous content.
         val cap = CapturedSnapshot(ConversationRef(pkg ?: "", snapshot.title), snapshot, SnapshotSource.TREE)
         val changed = state.observe(cap)
+        if (changed) endImageSession()  // a new message or chat: the old picture belongs to a finished session
         val sig = cap.signature
         val showing = overlay?.isShowing() == true
         // Same content and the bubble is already up → nothing to do.
@@ -259,6 +269,7 @@ open class ChatCaptureService : AccessibilityService() {
         // Same content but the bubble is gone (killed by MIUI, or we left and came
         // back) → just put the bubble back, do NOT re-analyze (saves tokens/time).
         if (!changed && !showing) {
+            endImageSession()  // the panel went away without a state change (bubble killed): the session is over
             val cached = synchronized(resultCache) { resultCache[cap.conv.key + "#" + sig] }
             main.post {
                 overlay?.showIdle(snapshot.title)
@@ -383,13 +394,20 @@ open class ChatCaptureService : AccessibilityService() {
         return snapshot
     }
 
-    private fun runAnalysis() {
-        val cap = state.pending ?: return
-        if (!prefs.hasReplyKey()) { main.post { overlay?.showError("未设置回复接口密钥，去设置里填") }; return }
+    /** True only for a generation the user asked for (panel opened, ↻, 换一条, the picture entry); only those may carry the picture. */
+    private var userAsked = false
+
+    /** True when a generation was started. */
+    private fun runAnalysis(): Boolean {
+        val asked = userAsked
+        userAsked = false
+        val cap = state.pending ?: return false
+        if (!prefs.hasReplyKey()) { main.post { overlay?.showError("未设置回复接口密钥，去设置里填") }; return false }
         // Sprint 5 (D1): the Jev judgment mode is deleted; bilingual is the only
         // path. The old prefs.bilingualMode flag is deprecated and always true.
-        val req = state.begin(cap) ?: return  // this exact snapshot is already being generated
-        runBilingual(req)
+        val req = state.begin(cap) ?: return false  // this exact snapshot is already being generated
+        runBilingual(req, asked)
+        return true
     }
 
     /**
@@ -399,7 +417,7 @@ open class ChatCaptureService : AccessibilityService() {
      * The worker only sees the immutable [req]; when it comes back, only the
      * generation the state still wants may touch the panel.
      */
-    private fun runBilingual(req: GenerationRequest) {
+    private fun runBilingual(req: GenerationRequest, userAsked: Boolean) {
         val cap = req.captured
         val snapshot = cap.snapshot
         // Sprint 7「换一条」闭环（有意的 prompt 产品决策变更）：上一轮被用户
@@ -420,6 +438,8 @@ open class ChatCaptureService : AccessibilityService() {
         // worker starts: from now on this generation only sees them, whatever the settings page does.
         // (ContextBuilder still reads the history count from prefs: a context input, not a route one.)
         val client = ReplyClient(prefs) { state.isWanted(req) }
+        // The picture only goes to the state it was taken for; any other state ends its session here.
+        val image = if (userAsked) imageSession?.take(key, sig) else null
         val contextOn = prefs.contextEnabled
         val relationSkips = prefs.relationSkips
         submit {
@@ -453,7 +473,7 @@ open class ChatCaptureService : AccessibilityService() {
             // 必须在请求前清，否则会抹掉请求期间用户刚点选留下的标记。
             if (propose) relationSettled.remove(key)
             val raw = try {
-                client.draftBilingual(snapshot, rel, ctx, transcript, style, propose, KbStore.isGroupTitle(snapshot.title))
+                client.draftBilingual(snapshot, rel, ctx, transcript, style, propose, KbStore.isGroupTitle(snapshot.title), image)
             } catch (e: Exception) {
                 main.post { if (state.finish(req) && overlay?.isShowing() == true) overlay?.showError(e.message ?: e.javaClass.simpleName) }
                 return@submit
@@ -463,13 +483,105 @@ open class ChatCaptureService : AccessibilityService() {
             Log.i(TAG, "bilingual: ${System.currentTimeMillis() - started}ms transcript=${transcript.size} style=${style.size}")
             // Cached under the exact state it was made for, wanted or not: coming back to that
             // state later shows it without a new call.
-            synchronized(resultCache) { resultCache["$key#$sig"] = result }
+            // A result that was read off a picture is not kept: it must not outlive the image session.
+            if (result.imageUse != ImageUse.ATTACHED) synchronized(resultCache) { resultCache["$key#$sig"] = result }
             main.post {
                 // Only the wanted generation may pop the panel: a newer message, another chat,
                 // or the panel going away already retired this one.
-                if (state.finish(req) && overlay?.isShowing() == true) showResult(result, cap)
+                if (state.finish(req) && overlay?.isShowing() == true) {
+                    if (result.imageUse.note.isNotEmpty())
+                        overlay?.setNote(listOfNotNull(snapshot.note, result.imageUse.note).joinToString("；"))
+                    showResult(result, cap)
+                }
             }
         }
+    }
+
+    // ---- S5: one manual picture reply. The cropped picture lives only in [imageSession], in memory,
+    // from the tap until the session ends (new message / chat switch, panel hidden, new tap, service teardown).
+    private var imageSession: ImageSession? = null
+
+    private fun endImageSession() {
+        imageSession?.release()
+        imageSession = null
+    }
+
+    /** Bubble-menu label for the picture entry; null = not offered (no whole, incoming picture on screen). */
+    private fun imageMenuLabel(): String? {
+        val latest = state.current?.snapshot?.latestImage ?: return null
+        if (latest.side != "other") return null
+        return if (prefs.imageReplyEnabled) "识别图片" else "识别图片（已在设置里关闭）"
+    }
+
+    /** What the screen shows right now, in the same form [maybeCapture] reads it; null = not a readable chat. */
+    private fun readCurrent(): CapturedSnapshot? {
+        val root = rootInActiveWindow ?: return null
+        val pkg = root.packageName?.toString() ?: return null
+        val raw = adapterFor(pkg)?.extract(root, resources) ?: return null
+        val snapshot = stabilizeTitle(pkg, raw)
+        return CapturedSnapshot(ConversationRef(pkg, snapshot.title), snapshot, SnapshotSource.TREE)
+    }
+
+    private fun imageReplyManual() {
+        if (!prefs.imageReplyEnabled) { overlay?.toast("图片识别已在设置里关闭，图片不会发出去"); return }
+        if (!prefs.hasReplyKey()) { overlay?.showError("未设置回复接口密钥，去设置里填"); return }
+        val before = readCurrent()
+        val seen = state.current
+        val bubble = before?.snapshot?.latestImage
+        if (before == null || bubble == null || bubble.side != "other") {
+            overlay?.toast("最新一条不是完整显示的对方图片"); return
+        }
+        if (seen == null || seen.conv.key != before.conv.key || seen.signature != before.signature) {
+            overlay?.toast("画面刚变了，稍后再点一次"); maybeCapture(); return
+        }
+        endImageSession()
+        screenCapture.capture { res ->
+            when (res) {
+                is ScreenCapture.Result.Failed -> {
+                    Log.i(TAG, "image: screenshot failed code=${res.code}")
+                    overlay?.showError(res.humanMessage)
+                }
+                is ScreenCapture.Result.Ok -> {
+                    val bmp = res.bitmap
+                    try {
+                        // The screen may have moved during the overlay-hide wait and the shot: the crop is only
+                        // taken when the same picture is still where the tree said it was.
+                        val now = readCurrent()
+                        val moved = now == null || now.conv.key != before.conv.key ||
+                            now.signature != before.signature || now.snapshot.latestImage != bubble
+                        val box = if (moved || overlay == null) null else ImageCrop.region(
+                            bubble, res.originX, res.originY, res.scaleX, res.scaleY, bmp.width, bmp.height)
+                        if (box == null) {
+                            overlay?.toast("画面在动或图片太小，已取消，没有发送任何图片")
+                        } else {
+                            val image = encodeJpeg(bmp, box)
+                            // Geometry only, never pixels: where the crop was taken and how big it is.
+                            Log.i(TAG, "image: crop=${box.left},${box.top},${box.right},${box.bottom} of ${bmp.width}x${bmp.height} jpeg=${image.size}B")
+                            imageSession = ImageSession(image, before.conv.key, before.signature)
+                            state.pend(before)
+                            userAsked = true
+                            if (!runAnalysis()) {
+                                endImageSession()
+                                overlay?.toast("正在生成中，稍后再点一次")
+                            }
+                        }
+                    } finally {
+                        runCatching { bmp.recycle() }
+                    }
+                }
+            }
+        }
+    }
+
+    /** The crop as JPEG bytes in memory only; nothing here touches storage. */
+    private fun encodeJpeg(bmp: Bitmap, box: PixelBox): EphemeralImage {
+        val crop = Bitmap.createBitmap(bmp, box.left, box.top, box.width, box.height)
+        val (w, h) = ImageCrop.outputSize(box.width, box.height)
+        val out = if (w == box.width && h == box.height) crop else Bitmap.createScaledBitmap(crop, w, h, true)
+        val bytes = java.io.ByteArrayOutputStream().also { out.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, it) }.toByteArray()
+        if (out !== crop) out.recycle()
+        crop.recycle()
+        return EphemeralImage(bytes)
     }
 
     /** Conversations (ConversationRef.key) that got a contact while their results were cached or
@@ -729,6 +841,7 @@ open class ChatCaptureService : AccessibilityService() {
             if (overlay?.isShowing() != true) overlay?.showIdle(snapshot.title)
             return
         }
+        endImageSession()
         // Same rule as the tree path: past this point the conversation is either
         // new or being force-refreshed, so drop whatever was shown before.
         overlay?.resetForNewConversation()
@@ -870,13 +983,21 @@ open class ChatCaptureService : AccessibilityService() {
         cm.setPrimaryClip(clip)
     }
 
-    override fun onInterrupt() {}
+    override fun onInterrupt() { endImageSession() }
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        endImageSession()
+        return super.onUnbind(intent)
+    }
 
     override fun onDestroy() {
         super.onDestroy()
         // Tear the overlay down and cut its callback so a stale button tap can
         // never call back into this dead instance.
         state.invalidate()
+        endImageSession()
+        overlay?.imageMenuLabel = { null }
+        overlay?.onImageReply = null
         overlay?.onManualAnalyze = null
         overlay?.onSaveContact = null
         overlay?.onOcrCapture = null
@@ -893,6 +1014,8 @@ open class ChatCaptureService : AccessibilityService() {
 
         /** How many of my own past messages go into the prompt as style examples. */
         private const val STYLE_SAMPLES = 25
+
+        private const val JPEG_QUALITY = 85
 
         /** Trailing debounce for WINDOW_CONTENT_CHANGED / VIEW_SCROLLED bursts. */
         private const val CAPTURE_DEBOUNCE_MS = 350L

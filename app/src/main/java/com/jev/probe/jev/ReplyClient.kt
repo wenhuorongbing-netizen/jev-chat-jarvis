@@ -2,6 +2,7 @@ package com.jev.probe.jev
 
 import com.jev.probe.core.BilingualResult
 import com.jev.probe.core.ChatSnapshot
+import com.jev.probe.core.EphemeralImage
 import com.jev.probe.core.Msg
 import com.jev.probe.core.RankedReply
 import com.jev.probe.core.Prefs
@@ -14,9 +15,15 @@ import org.json.JSONObject
  * prompt knobs. The client never goes back to [Prefs], so a settings change cannot reach a call
  * that has already started.
  */
-class ReplyConfig(val route: ModelRoute, val aboutMe: String, val historyCount: Int) {
+class ReplyConfig(
+    val route: ModelRoute,
+    val aboutMe: String,
+    val historyCount: Int,
+    /** The owner's image switch (settings), as it was when the call started. */
+    val imageEnabled: Boolean = true
+) {
     companion object {
-        fun of(prefs: Prefs) = ReplyConfig(ModelRoute.reply(prefs), prefs.aboutMe, prefs.contextHistoryCount.coerceIn(0, 100))
+        fun of(prefs: Prefs) = ReplyConfig(ModelRoute.reply(prefs), prefs.aboutMe, prefs.contextHistoryCount.coerceIn(0, 100), prefs.imageReplyEnabled)
     }
 }
 
@@ -26,7 +33,11 @@ class ReplyConfig(val route: ModelRoute, val aboutMe: String, val historyCount: 
  * [Prefs] is taken when it is constructed (see [ReplyConfig]); [isLive] says whether the
  * generation it serves is still wanted, so a stale one is not retried.
  */
-class ReplyClient(private val cfg: ReplyConfig, private val isLive: () -> Boolean = { true }) {
+class ReplyClient(
+    private val cfg: ReplyConfig,
+    private val isLive: () -> Boolean = { true },
+    private val capabilities: ModelCapabilities = ModelCapabilities.shared
+) {
 
     constructor(prefs: Prefs, isLive: () -> Boolean = { true }) : this(ReplyConfig.of(prefs), isLive)
 
@@ -43,7 +54,8 @@ class ReplyClient(private val cfg: ReplyConfig, private val isLive: () -> Boolea
         transcript: List<Msg> = snapshot.messages,
         style: List<String> = emptyList(),
         proposeRelation: Boolean = false,
-        isGroup: Boolean = false
+        isGroup: Boolean = false,
+        image: EphemeralImage? = null
     ): BilingualResult {
         // 窗口起点按 10 条取整：对话往后长几条时前缀不变，DeepSeek 的前缀缓存能命中（便宜很多）
         val start = maxOf(0, (transcript.size - WINDOW + 9) / 10 * 10)
@@ -71,7 +83,11 @@ class ReplyClient(private val cfg: ReplyConfig, private val isLive: () -> Boolea
         if (typical > 0) sb.append("我在这类聊天里一条消息通常约 ").append(typical).append(" 个字符。\n")
         sb.append("\n对话（最后一条是最新）：\n").append(convo).append("\n\n")
             .append(relationAsk(proposeRelation, isGroup)).append("输出 JSON。")
-        return ReplyParser.parseBilingual(chat(BILINGUAL_SYS, sb.toString(), temperature = 0.9))
+        val prompt = sb.toString()
+        val out = ImageReply.run(image, cfg.imageEnabled, { capabilities.imageInput(cfg.route).state }, isLive) { attach ->
+            ReplyParser.parseBilingual(chat(BILINGUAL_SYS, prompt, temperature = 0.9, attach))
+        }
+        return out.value.copy(imageUse = out.use)
     }
 
     /** The background + history preamble; empty string when there is no context. */
@@ -111,10 +127,15 @@ class ReplyClient(private val cfg: ReplyConfig, private val isLive: () -> Boolea
     }
 
     /** One chat-completions round trip; returns the assistant message envelope. */
-    private fun chat(system: String, user: String, temperature: Double): ChatReply {
+    private fun chat(system: String, user: String, temperature: Double, image: EphemeralImage? = null): ChatReply {
+        // With a picture the user turn is [text, image_url]; without one it stays a plain string.
+        val content: Any = if (image == null) user else JSONArray()
+            .put(JSONObject().put("type", "text").put("text", user + IMAGE_NOTE))
+            .put(JSONObject().put("type", "image_url")
+                .put("image_url", JSONObject().put("url", "data:image/jpeg;base64," + image.base64())))
         val messages = JSONArray()
             .put(JSONObject().put("role", "system").put("content", system))
-            .put(JSONObject().put("role", "user").put("content", user))
+            .put(JSONObject().put("role", "user").put("content", content))
         val body = JSONObject()
             .put("model", cfg.route.model)
             .put("messages", messages)
@@ -124,6 +145,9 @@ class ReplyClient(private val cfg: ReplyConfig, private val isLive: () -> Boolea
 
     companion object {
         private const val WINDOW = 40
+
+        /** Added to the user turn only when a picture rides along; the system prefix stays cacheable. */
+        private const val IMAGE_NOTE = "\n\n（对方最新发的是随附的这张图片，回复要结合图片内容。）"
 
         /** Extra instruction for the one request that proposes a relation; empty otherwise.
          *  Asks for ≤6 chars on purpose: [ReplyParser.MAX_RELATION_LEN] is the looser

@@ -528,7 +528,10 @@ class XAdapter : ChatAppAdapter {
  *
  * Side: WhatsApp leaves a wide gutter on the far side of every bubble (incoming
  * hugs the left edge, outgoing hugs the right), so whichever edge sits closer
- * to the screen border is the sender's side. Unverified on a real device.
+ * to the screen border is the sender's side. Verified on a Redmi 25060RK16C / Android 15 /
+ * WhatsApp 2.26.37.73 (incoming picture and text rows from real samples; outgoing picture only synthetic); not yet on the Xiaomi 14.
+ *
+ * Pictures: [WhatsAppImageRows] reads the newest row; see there for what makes one offerable.
  */
 class WhatsAppAdapter(override val pkg: String = PKG) : ChatAppAdapter {
     override val fillSupport = FillSupport.FRESH_VERIFIED
@@ -565,7 +568,11 @@ class WhatsAppAdapter(override val pkg: String = PKG) : ChatAppAdapter {
         if (title == null) title = findTitleInActionBar(root, firstBubbleTop, width, res, 0.1, 0.7)
         if (bubbles.isEmpty()) return ChatSnapshot(title, emptyList())
         bubbles.sortBy { it.first }
-        return ChatSnapshot(title, bubbles.map { Msg(it.second, it.third) })
+        val pictures = WhatsAppImageRows.scan(AccessibilityNodeView(root), pkg, width)
+        return ChatSnapshot(
+            title, bubbles.map { Msg(it.second, it.third) },
+            latestImage = pictures.latest, trailingImages = pictures.trailingImages
+        )
     }
 
     companion object {
