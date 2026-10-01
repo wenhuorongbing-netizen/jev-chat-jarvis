@@ -124,17 +124,15 @@ class KbStore internal constructor(private val filesDir: File) {
      * Never creates anything: an unknown title simply has no contact (v1.3
      * revision — contacts are only ever created by the user).
      *
-     * @param app package name of the chat app the title came from; used only to
-     *        prefer a contact that already knows this app when two match.
+     * @param app package name of the chat app the title came from. Only a contact that is
+     *        bound to this app is a match: one bound to another app, or to no app (made by
+     *        hand), is a suggestion ([ContactMatch], offered for the user to confirm), and its
+     *        notes and history do not flow into this conversation until [mergeInto] bound it.
      */
     fun findContact(title: String, app: String): Contact? {
         synchronized(lock) {
-            // A contact bound to another app is a different source: its notes and history
-            // must not flow into this conversation until the user confirmed the merge.
-            // One with no app recorded (made by hand) is open to every app by name.
-            val hits = nameMatches(title).filter { app.isBlank() || it.apps.isEmpty() || it.apps.contains(app) }
-            if (hits.isEmpty()) return null
-            return hits.firstOrNull { app.isNotBlank() && it.apps.contains(app) } ?: hits.first()
+            if (app.isBlank()) return null   // no app, no (app, name) identity
+            return nameMatches(title).firstOrNull { it.apps.contains(app) }
         }
     }
 

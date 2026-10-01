@@ -209,14 +209,79 @@ class KbStoreCommitTest {
     }
 
     @Test
-    fun `a contact bound to another app is not a match for context, one bound to none is`() {
+    fun `a contact bound to another app is not a match for context, nor is one bound to none`() {
         val s = store()
         s.saveContact(contact("a", "小王", qq))
         s.saveContact(contact("g", "老张"))               // made by hand, no app
 
         assertNull(s.findContact("小王", wa))
         assertEquals("a", s.findContact("小王", qq)?.id)
-        assertEquals("g", s.findContact("老张", wa)?.id)
+        assertNull(s.findContact("老张", wa))
+        assertNull(s.findContact("老张", ""))
+    }
+
+    // ------------------------------------------------------------ S3.1-B unbound contacts
+
+    @Test
+    fun `a hand-made contact gives no context to a same-name chat until the user confirms, then it does`() {
+        val s = store()
+        s.saveContact(contact("m", "小王"))                // made by hand, no app
+
+        assertNull(s.findContact("小王", qq))               // no context before confirmation
+        assertEquals(listOf("m"), ContactMatch.similar("小王", s.contacts()).map { it.id })  // but it is offered
+
+        assertTrue(s.mergeInto("m", "小王", qq).committed)  // the user's tap: "是同一个人"
+
+        assertEquals("m", store().findContact("小王", qq)?.id)   // from the files, not the cache
+        assertEquals(listOf(qq), store().contacts().single().apps)
+    }
+
+    @Test
+    fun `confirming for QQ does not open the contact to WhatsApp, which needs its own confirmation`() {
+        val s = store()
+        s.saveContact(contact("m", "小王"))
+        s.mergeInto("m", "小王", qq)
+
+        assertEquals("m", s.findContact("小王", qq)?.id)
+        assertNull(s.findContact("小王", wa))
+        s.mergeInto("m", "小王", wa)
+        assertEquals("m", s.findContact("小王", wa)?.id)
+    }
+
+    @Test
+    fun `an alias of a hand-made contact is held to the same rule`() {
+        val s = store()
+        s.saveContact(contact("m", "王建国", aliases = listOf("小王")))
+
+        assertNull(s.findContact("小王", qq))
+        assertNull(s.findContact("王建国", qq))
+        s.mergeInto("m", "小王", qq)
+        assertEquals("m", s.findContact("小王", qq)?.id)
+        assertEquals("m", s.findContact("王建国", qq)?.id)
+    }
+
+    @Test
+    fun `filing the chat as a new contact leaves the hand-made one without context`() {
+        val s = store()
+        s.saveContact(contact("m", "小王"))
+
+        val r = s.saveOrMergeContact("小王", qq)            // the user declined the merge
+
+        assertTrue(r.committed)
+        val mine = store().findContact("小王", qq)
+        assertNotNull(mine)
+        assertTrue(mine!!.id != "m")                         // its own (app, name) contact
+        assertEquals(emptyList<String>(), store().contacts().first { it.id == "m" }.apps)
+    }
+
+    @Test
+    fun `a contact already bound to the app is unaffected`() {
+        val s = store()
+        s.saveContact(contact("a", "小王", qq))
+        s.saveContact(contact("m", "小王"))                // an unbound twin
+
+        assertEquals("a", s.findContact("小王", qq)?.id)    // the bound one wins, as before
+        assertNull(s.findContact("小王", wa))
     }
 
     @Test
