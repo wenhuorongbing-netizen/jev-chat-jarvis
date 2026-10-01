@@ -571,7 +571,8 @@ class WhatsAppAdapter(override val pkg: String = PKG) : ChatAppAdapter {
         val pictures = WhatsAppImageRows.scan(AccessibilityNodeView(root), pkg, width)
         return ChatSnapshot(
             title, bubbles.map { Msg(it.second, it.third) },
-            latestImage = pictures.latest, trailingImages = pictures.trailingImages
+            latestImage = pictures.latest, trailingImages = pictures.trailingImages,
+            directChat = pictures.directChat
         )
     }
 

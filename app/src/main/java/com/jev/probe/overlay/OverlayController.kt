@@ -614,6 +614,7 @@ class OverlayController(private val ctx: Context) {
             p.animate().setListener(null).cancel()
             panelAnimating = false
             expanded = !expanded
+            imageHint?.visibility = if (expanded) View.GONE else View.VISIBLE
             if (expanded) clearNoticeDot()
             if (expanded) {
                 // collapsedX/collapsedY already hold the bubble's spot from the
@@ -633,6 +634,7 @@ class OverlayController(private val ctx: Context) {
             return
         }
         expanded = !expanded
+        imageHint?.visibility = if (expanded) View.GONE else View.VISIBLE
         if (expanded) clearNoticeDot()
         if (expanded) {
             // Open the panel from the left, fully on-screen and up high (clear of the
@@ -1157,6 +1159,41 @@ class OverlayController(private val ctx: Context) {
         }.start()
     }
 
+    /**
+     * S6 confirm-first pointer: a sticky pill that says a picture can be looked at. It only calls [onTap];
+     * nothing is sent by showing it. [key] names what it points at, so the same pointer is not rebuilt on
+     * every screen event; a different key replaces it.
+     */
+    private var imageHint: View? = null
+    private var imageHintKey: String? = null
+
+    fun showImageHint(key: String, label: String, onTap: () -> Unit) {
+        ensureRoot()
+        val r = root ?: return
+        if (imageHintKey == key && imageHint?.parent != null) return
+        clearImageHint()
+        val pill = TextView(ctx).apply {
+            text = label; setTextColor(Color.WHITE); textSize = 12f
+            setTypeface(typeface, Typeface.BOLD)
+            background = card(20, Color.argb(230, 0, 0, 0))
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+            maxWidth = screenW - dp(16)
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { gravity = Gravity.TOP or Gravity.START; topMargin = dp(BUBBLE + 4) }  // where the panel opens
+            visibility = if (expanded) View.GONE else View.VISIBLE
+            setOnClickListener { onTap() }
+        }
+        imageHint = pill; imageHintKey = key
+        r.addView(pill)
+    }
+
+    fun clearImageHint() {
+        imageHint?.let { (it.parent as? ViewGroup)?.removeView(it) }
+        imageHint = null; imageHintKey = null
+    }
+
     /** Every in-file notice routes to the in-panel snackbar (never a system Toast). */
     fun toast(msg: String) = snackbar(msg)
 
@@ -1174,6 +1211,7 @@ class OverlayController(private val ctx: Context) {
             v.animate().cancel(); v.clearAnimation(); r.removeView(v)
         }
         snackbar = null; snackbarHide = null
+        imageHint = null; imageHintKey = null  // its view goes with the root
         val wrap = bubbleWrap
         root = null; bubble = null; bubbleWrap = null; panel = null; contentBox = null
         noticeDot = null; expanded = false

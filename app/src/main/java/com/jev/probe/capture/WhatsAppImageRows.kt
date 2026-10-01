@@ -17,7 +17,7 @@ import com.jev.probe.core.ImageBubble
  */
 object WhatsAppImageRows {
 
-    class Scan(val latest: ImageBubble?, val trailingImages: Int)
+    class Scan(val latest: ImageBubble?, val trailingImages: Int, val directChat: Boolean = false)
 
     private const val GUARD = 6000
 
@@ -25,8 +25,10 @@ object WhatsAppImageRows {
         val rowPrefix = "$pkg:id/conversation_row_"
         val imageRow = "${rowPrefix}image"
         val divider = "${rowPrefix}date_divider"
+        val statusId = "$pkg:id/conversation_contact_status"
         val rows = ArrayList<NodeView>()
         var viewport: NodeView? = null
+        var status: String? = null
 
         val stack = ArrayDeque<NodeView>()
         stack.addLast(root)
@@ -36,6 +38,7 @@ object WhatsAppImageRows {
             val node = stack.removeLast()
             val id = node.id
             if (id == "android:id/list" && viewport == null) viewport = node
+            if (id == statusId && status == null) status = node.text
             if (id != null && id.startsWith(rowPrefix) && id != divider) {
                 rows.add(node)
                 continue  // rows do not nest; what is inside is read per row below
@@ -44,22 +47,23 @@ object WhatsAppImageRows {
         }
         rows.sortBy { it.top }
 
+        val direct = ImageHint.directChatProof(status)
         var trailing = 0
         for (r in rows.asReversed()) { if (r.id == imageRow) trailing++ else break }
         val last = rows.lastOrNull()
-        if (last == null || last.id != imageRow) return Scan(null, trailing)
+        if (last == null || last.id != imageRow) return Scan(null, trailing, direct)
 
         val layout = find(last, "$pkg:id/main_layout")
         val picture = find(last, "$pkg:id/image") ?: find(last, "$pkg:id/media_container")
-        if (layout == null || picture == null) return Scan(null, trailing)
+        if (layout == null || picture == null) return Scan(null, trailing, direct)
 
         val view = viewport ?: root
         val whole = picture.left >= view.left && picture.right <= view.right &&
             picture.top > view.top && picture.bottom < view.bottom
-        if (!whole || picture.right <= picture.left || picture.bottom <= picture.top) return Scan(null, trailing)
+        if (!whole || picture.right <= picture.left || picture.bottom <= picture.top) return Scan(null, trailing, direct)
 
         val side = if (width - layout.right < layout.left) "me" else "other"
-        return Scan(ImageBubble(picture.left, picture.top, picture.right, picture.bottom, side), trailing)
+        return Scan(ImageBubble(picture.left, picture.top, picture.right, picture.bottom, side), trailing, direct)
     }
 
     private fun find(from: NodeView, id: String): NodeView? {

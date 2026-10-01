@@ -33,7 +33,9 @@ data class ChatSnapshot(
     val latestImage: ImageBubble? = null,
     /** How many picture rows end the visible list; the picture has no message id, so a second
      *  one arriving (or the first one leaving) changes this and with it [signature]. */
-    val trailingImages: Int = 0
+    val trailingImages: Int = 0,
+    /** The toolbar proves a one-to-one chat (S6 [com.jev.probe.capture.ImageHint]); false = unknown, not "group". */
+    val directChat: Boolean = false
 ) {
     val latestFrom: String? get() = messages.lastOrNull()?.side
 

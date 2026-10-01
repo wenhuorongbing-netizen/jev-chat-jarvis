@@ -236,6 +236,7 @@ open class ChatCaptureService : AccessibilityService() {
         // WeChat hides them when the disguise fails) → screenshot + OCR, subject
         // to ScreenCapture's own >=1s throttle and failure backoff.
         if (snapshot.messages.isEmpty()) {
+            main.post { overlay?.clearImageHint() }
             // In a chat window, but the tree carries no text (Feishu draws its
             // message bodies). Park the bubble BEFORE attempting OCR, so the user
             // still has something to tap when OCR is off, deduped, or comes back
@@ -262,6 +263,7 @@ open class ChatCaptureService : AccessibilityService() {
         val cap = CapturedSnapshot(ConversationRef(pkg ?: "", snapshot.title), snapshot, SnapshotSource.TREE)
         val changed = state.observe(cap)
         if (changed) endImageSession()  // a new message or chat: the old picture belongs to a finished session
+        syncImageHint(cap)
         val sig = cap.signature
         val showing = overlay?.isShowing() == true
         // Same content and the bubble is already up → nothing to do.
@@ -501,6 +503,30 @@ open class ChatCaptureService : AccessibilityService() {
     // from the tap until the session ends (new message / chat switch, panel hidden, new tap, service teardown).
     private var imageSession: ImageSession? = null
 
+    /** S6 confirm-first: the picture the user already tapped the pointer for; it is not offered twice. */
+    private val imagePointer = ImagePointer()
+
+    private fun hintId(c: CapturedSnapshot) = c.conv.key + "#" + c.signature
+
+    /** Show or withdraw the "a picture can be looked at" pointer for what is on screen now. Shows nothing but a label. */
+    private fun syncImageHint(cap: CapturedSnapshot) {
+        val id = hintId(cap)
+        val offer = imagePointer.offer(id, ImageHint.offered(cap.conv.pkg, cap.snapshot, prefs.imageReplyEnabled))
+        main.post {
+            // A post queued before the panel was taken away must not bring it back: only what is still current counts.
+            if (offer && state.current?.let(::hintId) == id) overlay?.showImageHint(id, "对方发来一张图 · 识别并回复") { onImageHintTap(id) }
+            else overlay?.clearImageHint()
+        }
+    }
+
+    private fun onImageHintTap(id: String) {
+        overlay?.clearImageHint()
+        // Qualification is re-checked at the tap, not only when the pointer was drawn.
+        val cur = state.current?.takeIf { ImageHint.offered(it.conv.pkg, it.snapshot, prefs.imageReplyEnabled) }
+        if (!imagePointer.mayTap(id, cur?.let(::hintId))) { overlay?.toast("图片已经变了，没有发送任何图片"); return }
+        imageReplyManual()  // the S5 path re-reads the screen and refuses anything that moved; it spends the pointer once a crop is taken
+    }
+
     private fun endImageSession() {
         imageSession?.release()
         imageSession = null
@@ -558,6 +584,8 @@ open class ChatCaptureService : AccessibilityService() {
                             // Geometry only, never pixels: where the crop was taken and how big it is.
                             Log.i(TAG, "image: crop=${box.left},${box.top},${box.right},${box.bottom} of ${bmp.width}x${bmp.height} jpeg=${image.size}B")
                             imageSession = ImageSession(image, before.conv.key, before.signature)
+                            imagePointer.spend(hintId(before))
+                            overlay?.clearImageHint()
                             state.pend(before)
                             userAsked = true
                             if (!runAnalysis()) {
@@ -998,6 +1026,7 @@ open class ChatCaptureService : AccessibilityService() {
         endImageSession()
         overlay?.imageMenuLabel = { null }
         overlay?.onImageReply = null
+        overlay?.clearImageHint()
         overlay?.onManualAnalyze = null
         overlay?.onSaveContact = null
         overlay?.onOcrCapture = null
