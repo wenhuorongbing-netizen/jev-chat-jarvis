@@ -48,7 +48,7 @@ class RelationInputActivity : AppCompatActivity() {
         val ctx = applicationContext
         Thread {
             val msg = try {
-                KbStore.get(ctx).saveOrMergeContact(title, app, relation)
+                KbStore.get(ctx).saveOrMergeContact(title, app, relation).message
             } catch (e: Exception) { "保存失败：${e.javaClass.simpleName}" }
             runOnUiThread { Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show() }
         }.start()

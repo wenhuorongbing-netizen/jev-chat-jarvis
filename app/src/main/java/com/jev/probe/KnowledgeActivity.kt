@@ -20,6 +20,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.jev.probe.core.kb.Contact
+import com.jev.probe.core.kb.KbResult
 import com.jev.probe.core.kb.KbStore
 import com.jev.probe.core.kb.Note
 import com.jev.probe.core.ui.UiTokens
@@ -141,13 +142,13 @@ class KnowledgeActivity : AppCompatActivity() {
             .apply { setPadding(0, dp(4), 0, 0) })
         row.addView(left)
         row.addView(smallToggle(n.enabled) {
-            store.saveNote(n.copy(enabled = !n.enabled)); render()
+            toastIfFailed(store.saveNote(n.copy(enabled = !n.enabled), mustExist = true)); render()
         })
         c.addView(row)
         c.setOnClickListener { editNoteDialog(n) }
         c.setOnLongClickListener {
             confirm("删除笔记", "删除「${n.title}」？不可恢复。") {
-                store.deleteNote(n.id); render()
+                toastIfFailed(store.deleteNote(n.id)); render()
             }
             true
         }
@@ -178,14 +179,14 @@ class KnowledgeActivity : AppCompatActivity() {
                 if (title.isBlank() && content.isBlank()) {
                     toast("标题和正文不能都空着"); return@setPositiveButton
                 }
-                store.saveNote(Note(
+                toastIfFailed(store.saveNote(Note(
                     id = existing?.id ?: KbStore.newId(),
                     title = title,
                     content = content,
                     tags = splitTags(tagsEdit.text.toString()),
                     alwaysOn = (alwaysRow.tag as? Boolean) ?: false,
                     enabled = (enabledRow.tag as? Boolean) ?: true
-                ))
+                ), mustExist = existing != null))
                 render()
             }
             .setNegativeButton("取消", null)
@@ -206,18 +207,23 @@ class KnowledgeActivity : AppCompatActivity() {
             .setPositiveButton("导入") { _, _ ->
                 val chunks = input.text.toString().split(Regex("\\r?\\n[ \\t]*\\r?\\n"))
                 var n = 0
+                var failed = 0
                 chunks.forEach { chunk ->
                     val lines = chunk.trim().split("\n").map { it.trim() }.filter { it.isNotEmpty() }
                     if (lines.isNotEmpty()) {
-                        store.saveNote(Note(
+                        val saved = store.saveNote(Note(
                             id = KbStore.newId(),
                             title = lines.first(),
                             content = lines.drop(1).joinToString("\n")
                         ))
-                        n++
+                        if (saved.committed) n++ else failed++
                     }
                 }
-                toast(if (n == 0) "没解析出内容" else "已导入 $n 条")
+                toast(when {
+                    n == 0 && failed == 0 -> "没解析出内容"
+                    failed == 0 -> "已导入 ${n} 条"
+                    else -> "已导入 ${n} 条，${failed} 条没保存成功"
+                })
                 render()
             }
             .setNegativeButton("取消", null)
@@ -274,7 +280,7 @@ class KnowledgeActivity : AppCompatActivity() {
         c.setOnClickListener { editContactDialog(c0) }
         c.setOnLongClickListener {
             confirm("删除联系人", "删除「${c0.name}」及其全部历史？不可恢复。") {
-                store.deleteContact(c0.id); render()
+                toastIfFailed(store.deleteContact(c0.id)); render()
             }
             true
         }
@@ -304,7 +310,7 @@ class KnowledgeActivity : AppCompatActivity() {
             .setPositiveButton("保存") { _, _ ->
                 val name = nameEdit.text.toString().trim()
                 if (name.isBlank()) { toast("名字不能空"); return@setPositiveButton }
-                store.saveContact(Contact(
+                toastIfFailed(store.saveContact(Contact(
                     id = existing?.id ?: KbStore.newId(),
                     name = name,
                     aliases = aliasEdit.text.toString().split("\n")
@@ -314,11 +320,17 @@ class KnowledgeActivity : AppCompatActivity() {
                     notes = notesEdit.text.toString().trim(),
                     autoSummary = existing?.autoSummary ?: "",
                     isGroup = existing?.isGroup ?: false
-                ))
+                ), mustExist = existing != null))
                 render()
             }
             .setNegativeButton("取消", null)
             .show()
+    }
+
+    /** Tells the user when a write did not go through; true only for a real commit. */
+    private fun toastIfFailed(r: KbResult): Boolean {
+        if (!r.committed) toast(r.message)
+        return r.committed
     }
 
     private fun appLabel(pkg: String): String = when (pkg) {

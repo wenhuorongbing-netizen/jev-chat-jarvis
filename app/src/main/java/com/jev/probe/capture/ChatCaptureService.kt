@@ -128,9 +128,10 @@ open class ChatCaptureService : AccessibilityService() {
                 title.isNullOrBlank() -> overlay?.toast("当前会话没有标题，存不了")
                 isTransientTitle(title) -> overlay?.toast("当前会话标题还没加载出来，稍后再试")
                 else -> submit {
-                    relationSettled.add(ConversationRef(pkg, title).key)
                     val msg = try {
-                        KbStore.get(this).saveOrMergeContact(title, pkg)
+                        KbStore.get(this).saveOrMergeContact(title, pkg).also {
+                            if (it.committed) relationSettled.add(ConversationRef(pkg, title).key)
+                        }.message
                     } catch (e: Exception) { "保存失败：${e.javaClass.simpleName}" }
                     main.post { overlay?.toast(msg) }
                 }
@@ -490,19 +491,21 @@ open class ChatCaptureService : AccessibilityService() {
         val actions = if (!bar || title == null) null else RelationBarActions(
             similar = similarContacts(title),
             onMerge = { contact ->
-                relationSettled.add(key)
                 submit {
                     val msg = try {
-                        KbStore.get(this).mergeInto(contact.id, title, app)
+                        KbStore.get(this).mergeInto(contact.id, title, app).also {
+                            if (it.committed) relationSettled.add(key)
+                        }.message
                     } catch (e: Exception) { "保存失败：${e.javaClass.simpleName}" }
                     main.post { overlay?.toast(msg) }
                 }
             },
             onPick = { relation ->
-                relationSettled.add(key)
                 submit {
                     val msg = try {
-                        KbStore.get(this).saveOrMergeContact(title, app, relation)
+                        KbStore.get(this).saveOrMergeContact(title, app, relation).also {
+                            if (it.committed) relationSettled.add(key)
+                        }.message
                     } catch (e: Exception) { "保存失败：${e.javaClass.simpleName}" }
                     main.post { overlay?.toast(msg) }
                 }

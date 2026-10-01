@@ -5,6 +5,16 @@ import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+
+private const val LOG_TAG = "JEVASSIST"
+
+// Android's Log is a stub that throws in plain JVM unit tests; logging must never fail a write.
+private fun logW(msg: String) { runCatching { Log.w(LOG_TAG, msg) } }
+private fun logD(msg: String) { runCatching { Log.d(LOG_TAG, msg) } }
+private fun logI(msg: String) { runCatching { Log.i(LOG_TAG, msg) } }
 
 /** Note / contact / history counts, for the settings screen. */
 data class KbCounts(val notes: Int, val contacts: Int, val logLines: Int)
@@ -17,16 +27,19 @@ data class KbCounts(val notes: Int, val contacts: Int, val logLines: Int)
  *   kb/logs/<contactId>.json per-contact chat history (≤ 300 lines)
  *
  * Single writer by construction: every read and write goes through one lock, and
- * writes land via a temp file + rename so a kill mid-write can never leave half
- * a JSON document behind. Serialization is hand-written org.json (no Gson/Moshi
- * dependency). Chat text never reaches logcat — only counts and lengths.
+ * writes land via a synced temp file + atomic replace, so a kill mid-write leaves
+ * either the whole old or the whole new document, never half. When the replace
+ * is not possible the write FAILS (the old file is untouched) — there is no
+ * in-place overwrite fallback. Every mutation returns a [KbResult]: a caller may
+ * say "saved" only for [KbResult.Committed]. Serialization is hand-written
+ * org.json (no Gson/Moshi dependency). Chat text never reaches logcat — only
+ * counts and lengths.
  */
-class KbStore private constructor(context: Context) {
+class KbStore internal constructor(private val filesDir: File) {
 
-    private val app = context.applicationContext
     private val lock = Any()
 
-    private val root: File get() = File(app.filesDir, "kb")
+    private val root: File get() = File(filesDir, "kb")
     private val notesFile: File get() = File(root, "notes.json")
     private val contactsFile: File get() = File(root, "contacts.json")
     private fun logFile(contactId: String) = File(File(root, "logs"), "$contactId.json")
@@ -45,23 +58,23 @@ class KbStore private constructor(context: Context) {
 
     fun note(id: String): Note? = synchronized(lock) { loadNotes().firstOrNull { it.id == id } }
 
-    /** Insert or replace by id. Returns false when it did not reach disk. */
-    fun saveNote(note: Note): Boolean = synchronized(lock) {
+    /**
+     * Insert or replace by id. [KbResult.Committed] only once it is on disk. With [mustExist] a note
+     * deleted in the meantime is NOT brought back (a toggle or edit dialog holding an old copy).
+     */
+    fun saveNote(note: Note, mustExist: Boolean = false): KbResult = synchronized(lock) {
         val list = loadNotes()
         val i = list.indexOfFirst { it.id == note.id }
+        if (i < 0 && mustExist) return@synchronized KbResult.Rejected("笔记已经不在了")
         val stamped = note.copy(updatedAt = System.currentTimeMillis())
         if (i >= 0) list[i] = stamped else list.add(stamped)
-        val ok = writeAtomic(notesFile, notesJson(list))
-        if (!ok) notesCache = null   // memory must not claim a write that failed
-        ok
+        commit(notesFile, notesJson(list)) { notesCache = null }
     }
 
-    fun deleteNote(id: String): Boolean = synchronized(lock) {
+    fun deleteNote(id: String): KbResult = synchronized(lock) {
         val list = loadNotes()
-        if (!list.removeAll { it.id == id }) return@synchronized true
-        val ok = writeAtomic(notesFile, notesJson(list))
-        if (!ok) notesCache = null
-        ok
+        if (!list.removeAll { it.id == id }) return@synchronized KbResult.Rejected("笔记已经不在了")
+        commit(notesFile, notesJson(list)) { notesCache = null }
     }
 
     // --------------------------------------------------------------- contacts
@@ -70,29 +83,40 @@ class KbStore private constructor(context: Context) {
 
     fun contact(id: String): Contact? = synchronized(lock) { loadContacts().firstOrNull { it.id == id } }
 
-    fun saveContact(c: Contact): Boolean = synchronized(lock) {
+    /**
+     * Insert or replace by id. With [mustExist] a contact that was deleted in the
+     * meantime is NOT brought back (an edit dialog or a late task holding an old copy).
+     */
+    fun saveContact(c: Contact, mustExist: Boolean = false): KbResult = synchronized(lock) {
         val list = loadContacts()
         val i = list.indexOfFirst { it.id == c.id }
+        if (i < 0 && mustExist) return@synchronized KbResult.Rejected("联系人已经不在了")
         val stamped = c.copy(updatedAt = System.currentTimeMillis())
         if (i >= 0) list[i] = stamped else list.add(stamped)
-        val ok = writeAtomic(contactsFile, contactsJson(list))
-        if (!ok) contactsCache = null
-        ok
+        commit(contactsFile, contactsJson(list)) { contactsCache = null }
     }
 
-    /** Removes the contact and its history file. */
-    fun deleteContact(id: String): Boolean = synchronized(lock) {
+    /**
+     * Removes the contact and its history files. The history goes only after the
+     * contact list itself was written: a failed delete must not leave a contact
+     * whose history is already gone.
+     */
+    fun deleteContact(id: String): KbResult = synchronized(lock) {
         val list = loadContacts()
-        var ok = true
-        if (list.removeAll { it.id == id }) {
-            ok = writeAtomic(contactsFile, contactsJson(list))
-            if (!ok) contactsCache = null
+        val found = list.removeAll { it.id == id }
+        var result: KbResult = KbResult.Rejected("联系人已经不在了")
+        if (found) {
+            result = commit(contactsFile, contactsJson(list)) { contactsCache = null }
+            if (!result.committed) return@synchronized result
         }
         logCache.remove(id)
         lastScreenCache.remove(id)
-        runCatching { logFile(id).delete() }
-        runCatching { screenFile(id).delete() }
-        ok
+        // The contact is gone for good; its history is private data the user asked to delete, so a file
+        // that cannot be removed is reported, not hidden behind "deleted".
+        val leftover = listOf(logFile(id), screenFile(id)).any { f ->
+            f.exists() && !runCatching { f.delete() }.getOrDefault(false)
+        }
+        if (leftover) KbResult.Failed("联系人已删除，但它的聊天记录文件没能清掉") else result
     }
 
     /**
@@ -105,62 +129,76 @@ class KbStore private constructor(context: Context) {
      */
     fun findContact(title: String, app: String): Contact? {
         synchronized(lock) {
-            val want = normalizeName(title)
-            if (want.isEmpty()) return null
-            val hits = loadContacts().filter { c ->
-                normalizeName(c.name) == want || c.aliases.any { normalizeName(it) == want }
-            }
+            // A contact bound to another app is a different source: its notes and history
+            // must not flow into this conversation until the user confirmed the merge.
+            // One with no app recorded (made by hand) is open to every app by name.
+            val hits = nameMatches(title).filter { app.isBlank() || it.apps.isEmpty() || it.apps.contains(app) }
             if (hits.isEmpty()) return null
             return hits.firstOrNull { app.isNotBlank() && it.apps.contains(app) } ?: hits.first()
         }
     }
 
+    /** Every contact whose name or alias equals [title] (normalized), whatever app it is bound to. */
+    private fun nameMatches(title: String): List<Contact> {
+        val want = normalizeName(title)
+        if (want.isEmpty()) return emptyList()
+        return loadContacts().filter { c ->
+            normalizeName(c.name) == want || c.aliases.any { normalizeName(it) == want }
+        }
+    }
+
     /**
-     * Create a contact from a conversation title, or fold the title/app into the
-     * one that already matches. Returns a message for the toast.
+     * The user asked to file this conversation as a contact.
+     *
+     * Identity is (app, name): the same title in an app that contact is already bound to
+     * is the same conversation, nothing new is merged. A name that only matches a contact
+     * of ANOTHER app (or one bound to no app) is a suggestion, never an identity: the
+     * conversation gets a contact of its own and the message names the look-alike, so
+     * merging stays the user's explicit choice ([mergeInto]).
      *
      * @param relationship the user-confirmed relation (关系提议); written only when a
-     *        new contact is created. Merging into an existing one is left as is.
+     *        new contact is created. An existing one keeps its own.
      */
-    fun saveOrMergeContact(title: String, app: String, relationship: String = ""): String {
+    fun saveOrMergeContact(title: String, app: String, relationship: String = ""): KbResult = synchronized(lock) {
         val display = displayName(title)
-        if (display.isEmpty()) return "当前会话没有标题，存不了"
-        val existing = findContact(title, app)
-        if (existing == null) {
-            val aliases = if (displayName(title) != title.trim()) listOf(title.trim()) else emptyList()
-            saveContact(Contact(
-                id = newId(),
-                name = display,
-                aliases = aliases,
-                apps = if (app.isBlank()) emptyList() else listOf(app),
-                relationship = relationship.trim(),
-                isGroup = isGroupTitle(title)
-            ))
-            return "已存为联系人「${display}」"
-        }
-        return foldInto(existing, title, app)
+        if (display.isEmpty()) return@synchronized KbResult.Rejected("当前会话没有标题，存不了")
+        val hits = nameMatches(title)
+        val same = hits.firstOrNull { app.isNotBlank() && it.apps.contains(app) }
+        if (same != null) return@synchronized foldInto(same, title, app)
+        val aliases = if (display != title.trim()) listOf(title.trim()) else emptyList()
+        val saved = saveContact(Contact(
+            id = newId(),
+            name = display,
+            aliases = aliases,
+            apps = if (app.isBlank()) emptyList() else listOf(app),
+            relationship = relationship.trim(),
+            isGroup = isGroupTitle(title)
+        ))
+        if (!saved.committed) return@synchronized saved
+        val lookalike = hits.firstOrNull()?.let { "（另有同名联系人「${it.name}」，是同一个人的话请在知识库里确认合并）" } ?: ""
+        KbResult.Committed("已存为联系人「${display}」${lookalike}")
     }
 
     /**
      * 合并推荐被用户点选后：把这个会话并入 [contactId]（标题记为别名、App 记入）。
      * 只在用户点了「是同一个人」之后调用；联系人的关系与备注不动。
      */
-    fun mergeInto(contactId: String, title: String, app: String): String = synchronized(lock) {
-        val existing = contact(contactId) ?: return "联系人已经不在了"
+    fun mergeInto(contactId: String, title: String, app: String): KbResult = synchronized(lock) {
+        val existing = contact(contactId) ?: return@synchronized KbResult.Rejected("联系人已经不在了")
         foldInto(existing, title, app)
     }
 
     /** Add [app] and the raw [title] (as an alias, when not already a known name) to [existing]. */
-    private fun foldInto(existing: Contact, title: String, app: String): String {
+    private fun foldInto(existing: Contact, title: String, app: String): KbResult {
         val apps = if (app.isBlank() || existing.apps.contains(app)) existing.apps else existing.apps + app
         val raw = title.trim()
         val known = (listOf(existing.name) + existing.aliases).map { normalizeName(it) }
         val aliases = if (raw.isNotEmpty() && normalizeName(raw) !in known)
             existing.aliases + raw else existing.aliases
         if (apps == existing.apps && aliases == existing.aliases)
-            return "联系人「${existing.name}」已存在"
-        saveContact(existing.copy(apps = apps, aliases = aliases))
-        return "已并入联系人「${existing.name}」"
+            return KbResult.Committed("联系人「${existing.name}」已存在")
+        val saved = saveContact(existing.copy(apps = apps, aliases = aliases), mustExist = true)
+        return if (saved.committed) KbResult.Committed("已并入联系人「${existing.name}」") else saved
     }
 
     // ---------------------------------------------------------------- history
@@ -193,6 +231,8 @@ class KbStore private constructor(context: Context) {
         synchronized(lock) {
             val screen = entries.filter { it.text.isNotBlank() }
             if (screen.isEmpty()) return true
+            // A late capture for a contact deleted meanwhile must not bring its history back.
+            if (loadContacts().none { it.id == contactId }) return false
             val list = loadLog(contactId)
             val keys = screen.map { key(it.side, it.text) }
             val prev = if (screenBatch) loadLastScreen(contactId) else emptyList()
@@ -219,7 +259,7 @@ class KbStore private constructor(context: Context) {
                 // Nothing in common with the screen we last wrote → we are looking
                 // at older messages, not newer ones. Leave the log alone.
                 prev.isNotEmpty() && keys.none { it in prev } -> {
-                    Log.d(TAG, "appendLog contact=$contactId skipped: scrolled off the last screen")
+                    logD("appendLog contact=$contactId skipped: scrolled off the last screen")
                     return true
                 }
                 else -> screen
@@ -234,7 +274,7 @@ class KbStore private constructor(context: Context) {
             val ok = writeAtomic(logFile(contactId), logJson(list))
             if (!ok) logCache.remove(contactId)
             if (ok && screenBatch) saveLastScreen(contactId, keys)
-            Log.d(TAG, "appendLog contact=$contactId added=${tail.size} overlap=$k total=${list.size} ok=$ok")
+            logD("appendLog contact=$contactId added=${tail.size} overlap=$k total=${list.size} ok=$ok")
             return ok
         }
     }
@@ -306,8 +346,8 @@ class KbStore private constructor(context: Context) {
         logCache.clear()
         lastScreenCache.clear()
         runCatching { root.deleteRecursively() }
-        runCatching { File(app.filesDir, "memory").deleteRecursively() }
-        Log.i(TAG, "kb+memory cleared")
+        runCatching { File(filesDir, "memory").deleteRecursively() }
+        logI("kb+memory cleared")
         Unit
     }
 
@@ -446,40 +486,44 @@ class KbStore private constructor(context: Context) {
             val backup = File(f.parentFile, "${f.name}.corrupt.${System.currentTimeMillis()}")
             val kept = runCatching { f.renameTo(backup) }.getOrDefault(false)
             if (kept) unreadable.remove(f.absolutePath) else unreadable.add(f.absolutePath)
-            Log.w(TAG, "unreadable ${f.name}: ${e.javaClass.simpleName} preserved=$kept")
+            logW("unreadable ${f.name}: ${e.javaClass.simpleName} preserved=$kept")
             Loaded(null, kept)
         }
     }
 
     /**
-     * Temp file + rename, so a crash never leaves a half-written document.
-     *
-     * The rename REPLACES the destination in one step (POSIX semantics, same
-     * directory) — deleting the old file first would mean a kill in between
-     * loses everything. Returns false when the data did not reach disk; callers
-     * drop their cache so the next read goes back to the file.
+     * Synced temp file, then an atomic replace of the destination: a crash leaves the whole
+     * old file or the whole new one. If the replace is not possible the write fails and the
+     * old file is untouched — overwriting in place is NOT a fallback, it would not be atomic.
+     * Returns false when the data did not reach disk; callers drop their cache so the next
+     * read goes back to the file.
      */
     private fun writeAtomic(f: File, text: String): Boolean {
         if (f.absolutePath in unreadable) {
-            Log.w(TAG, "refusing to overwrite unparsable ${f.name}")
+            logW("refusing to overwrite unparsable ${f.name}")
             return false
         }
         val tmp = File(f.parentFile, f.name + ".tmp")
         return try {
             f.parentFile?.mkdirs()
-            tmp.writeText(text, Charsets.UTF_8)
-            if (tmp.renameTo(f)) return true
-            // Same-directory rename should not fail. If it somehow does, an
-            // in-place overwrite is the only way left — not atomic, so say so.
-            Log.w(TAG, "rename failed, overwriting ${f.name} in place")
-            f.writeText(text, Charsets.UTF_8)
-            runCatching { tmp.delete() }
+            FileOutputStream(tmp).use { out ->
+                out.write(text.toByteArray(Charsets.UTF_8))
+                out.fd.sync()
+            }
+            Files.move(tmp.toPath(), f.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
             true
         } catch (e: Exception) {
             runCatching { tmp.delete() }
-            Log.w(TAG, "write failed ${f.name}: ${e.javaClass.simpleName}")
+            logW("write failed ${f.name}: ${e.javaClass.simpleName}")
             false
         }
+    }
+
+    /** Write [text] to [f]. On failure [forget] drops the in-memory copy so it goes back to what is on disk. */
+    private fun commit(f: File, text: String, forget: () -> Unit): KbResult {
+        if (writeAtomic(f, text)) return KbResult.Committed()
+        forget()
+        return KbResult.Failed("保存失败：没有写进存储，原内容保持不变")
     }
 
     private fun strList(arr: JSONArray?): List<String> {
@@ -495,14 +539,13 @@ class KbStore private constructor(context: Context) {
     private fun key(side: String, text: String) = side + "\u0000" + text
 
     companion object {
-        private const val TAG = "JEVASSIST"
         const val MAX_LOG = 300
 
         @Volatile private var instance: KbStore? = null
 
         fun get(context: Context): KbStore =
             instance ?: synchronized(this) {
-                instance ?: KbStore(context).also { instance = it }
+                instance ?: KbStore(context.applicationContext.filesDir).also { instance = it }
             }
 
         fun newId(): String = java.util.UUID.randomUUID().toString().substring(0, 12)
@@ -517,7 +560,7 @@ class KbStore private constructor(context: Context) {
          */
         private fun safeRegex(pattern: String): Regex? =
             runCatching { Regex(pattern) }.getOrElse {
-                Log.w(TAG, "regex init failed: ${it.javaClass.simpleName} ${it.message ?: ""}")
+                logW("regex init failed: ${it.javaClass.simpleName} ${it.message ?: ""}")
                 null
             }
 

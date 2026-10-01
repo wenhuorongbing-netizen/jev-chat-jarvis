@@ -85,3 +85,17 @@ data class ChatContext(
         return sb.toString().trim()
     }
 }
+
+/**
+ * What a knowledge-base mutation really did. Only [Committed] may be reported to the user as
+ * saved: [Rejected] = nothing was written on purpose (gone, blank title…); [Failed] = a write
+ * was attempted and did not reach disk, the old data is unchanged.
+ */
+sealed class KbResult {
+    abstract val message: String
+    val committed: Boolean get() = this is Committed
+
+    data class Committed(override val message: String = "") : KbResult()
+    data class Rejected(override val message: String) : KbResult()
+    data class Failed(override val message: String) : KbResult()
+}
