@@ -421,6 +421,7 @@ class OverlayController(private val ctx: Context) {
                         params.x = (startX + dx).coerceIn(dp(8), screenW - dp(60))
                         params.y = (startY + dy).coerceIn(dp(24), screenH - dp(120))
                         root?.let { runCatching { wm.updateViewLayout(it, params) } }
+                        placeImageHint()
                     }
                     true
                 }
@@ -462,6 +463,7 @@ class OverlayController(private val ctx: Context) {
             addUpdateListener {
                 params.x = it.animatedValue as Int
                 root?.let { r -> runCatching { wm.updateViewLayout(r, params) } }
+                placeImageHint()
             }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
@@ -631,6 +633,7 @@ class OverlayController(private val ctx: Context) {
             }
             android.util.Log.d("JEVASSIST", "overlay: toggle expanded=$expanded x=${params.x} y=${params.y} saved=($collapsedX,$collapsedY)")
             root?.let { runCatching { wm.updateViewLayout(it, params) } }
+            placeImageHint()
             return
         }
         expanded = !expanded
@@ -663,6 +666,7 @@ class OverlayController(private val ctx: Context) {
             if (!hasResult && !loading) root?.post { onManualAnalyze?.invoke() }
             android.util.Log.d("JEVASSIST", "overlay: toggle expanded=$expanded x=${params.x} y=${params.y} saved=($collapsedX,$collapsedY)")
             root?.let { runCatching { wm.updateViewLayout(it, params) } }
+            placeImageHint()
         } else {
             // Collapse: hide the panel and hand the window position back to the
             // bubble only after the fade+slide has finished.
@@ -678,6 +682,7 @@ class OverlayController(private val ctx: Context) {
             } else {
                 params.x = collapsedX; params.y = collapsedY  // bubble returns to where it was
                 root?.let { runCatching { wm.updateViewLayout(it, params) } }
+                placeImageHint()
             }
             android.util.Log.d("JEVASSIST", "overlay: toggle expanded=$expanded x=${params.x} y=${params.y} saved=($collapsedX,$collapsedY)")
         }
@@ -689,6 +694,7 @@ class OverlayController(private val ctx: Context) {
         p.alpha = 1f; p.translationY = 0f
         params.x = collapsedX; params.y = collapsedY
         root?.let { runCatching { wm.updateViewLayout(it, params) } }
+        placeImageHint()
     }
 
     // ------------------------------------------------------------ public API
@@ -1165,12 +1171,18 @@ class OverlayController(private val ctx: Context) {
      * every screen event; a different key replaces it.
      */
     private var imageHint: View? = null
+    private var imageHintLp: WindowManager.LayoutParams? = null
     private var imageHintKey: String? = null
 
+    /**
+     * The pill is its own small window, centred on the screen under the bubble, NOT a child of the bubble's
+     * wrap-content window: a child that wide made the system shift the whole bubble window left to fit it
+     * (seen on a Xiaomi 12 Pro: the bubble jumped to mid-screen while the pill was up).
+     */
     fun showImageHint(key: String, label: String, onTap: () -> Unit) {
         ensureRoot()
-        val r = root ?: return
-        if (imageHintKey == key && imageHint?.parent != null) return
+        if (root == null) return
+        if (imageHintKey == key && imageHint?.isAttachedToWindow == true) return
         clearImageHint()
         val pill = TextView(ctx).apply {
             text = label; setTextColor(Color.WHITE); textSize = 12f
@@ -1178,20 +1190,35 @@ class OverlayController(private val ctx: Context) {
             background = card(20, Color.argb(230, 0, 0, 0))
             setPadding(dp(14), dp(8), dp(14), dp(8))
             maxLines = 1; ellipsize = TextUtils.TruncateAt.END
-            maxWidth = screenW - dp(16)
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { gravity = Gravity.TOP or Gravity.START; topMargin = dp(BUBBLE + 4) }  // where the panel opens
+            maxWidth = screenW - dp(32)
             visibility = if (expanded) View.GONE else View.VISIBLE
             setOnClickListener { onTap() }
         }
-        imageHint = pill; imageHintKey = key
-        r.addView(pill)
+        val p = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT
+        ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL }
+        imageHint = pill; imageHintLp = p; imageHintKey = key
+        placeImageHint()
+        try { wm.addView(pill, p) } catch (e: Exception) {
+            android.util.Log.e("JEVASSIST", "image hint addView failed: ${e.message}")
+            imageHint = null; imageHintLp = null; imageHintKey = null
+        }
+    }
+
+    /** Just under the bubble (where the panel opens), kept in step when the bubble moves. */
+    private fun placeImageHint() {
+        val v = imageHint ?: return
+        val p = imageHintLp ?: return
+        p.y = (lp?.y ?: 0) + dp(BUBBLE + 4)
+        if (v.isAttachedToWindow) runCatching { wm.updateViewLayout(v, p) }
     }
 
     fun clearImageHint() {
-        imageHint?.let { (it.parent as? ViewGroup)?.removeView(it) }
-        imageHint = null; imageHintKey = null
+        imageHint?.let { v -> runCatching { wm.removeView(v) } }
+        imageHint = null; imageHintLp = null; imageHintKey = null
     }
 
     /** Every in-file notice routes to the in-panel snackbar (never a system Toast). */
@@ -1211,7 +1238,7 @@ class OverlayController(private val ctx: Context) {
             v.animate().cancel(); v.clearAnimation(); r.removeView(v)
         }
         snackbar = null; snackbarHide = null
-        imageHint = null; imageHintKey = null  // its view goes with the root
+        clearImageHint()  // its own window
         val wrap = bubbleWrap
         root = null; bubble = null; bubbleWrap = null; panel = null; contentBox = null
         noticeDot = null; expanded = false
