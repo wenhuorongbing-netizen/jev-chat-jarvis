@@ -27,7 +27,9 @@ class ApiException(
     val route: String,
     val status: Int?,
     val hint: String,
-    val kind: ErrorKind = status?.let { ErrorKind.ofStatus(it) } ?: ErrorKind.TRANSPORT
+    val kind: ErrorKind = status?.let { ErrorKind.ofStatus(it) } ?: ErrorKind.TRANSPORT,
+    /** The provider said, in a structured error code, that it takes no images (see [ImageRejection]). One local flag; the body is gone. */
+    val imageRejected: Boolean = false
 ) : RuntimeException(buildMessage(route, status, hint)) {
 
     companion object {
@@ -39,6 +41,7 @@ class ApiException(
             401, 403 -> "密钥被拒，请检查该接口的密钥"
             404 -> "地址或模型名不对"
             400, 422 -> "请求被拒绝，请检查模型名和接口地址"
+            413 -> "请求太大（图片或聊天内容超出接口限制），不是接口不支持图片"
             402 -> "账户余额或额度不足"
             429, 529 -> "服务繁忙，请稍后再试"
             in 500..599 -> "服务端出错，请稍后再试"
@@ -94,9 +97,13 @@ object HttpJson {
             val bytes = body.toString().toByteArray(Charsets.UTF_8)
             conn.outputStream.use { os: OutputStream -> os.write(bytes) }
             val code = conn.responseCode
-            // Branch on the status code FIRST, and do not read an error body at
-            // all: only the status and our own hint go into the exception.
-            if (code !in 200..299) throw ApiException(route, code, ApiException.hintFor(code))
+            // Branch on the status code FIRST. The error body never goes into the exception: only the
+            // status and our own hint do. The one thing taken from it is a yes/no ("the provider's
+            // structured code says it takes no images", 400/415/422 only, bounded read), then it is gone.
+            if (code !in 200..299) {
+                throw ApiException(route, code, ApiException.hintFor(code),
+                    imageRejected = ImageRejection.fromStream(code, conn.errorStream))
+            }
             val text = readBody(conn.inputStream)
             if (text.isBlank()) throw ApiException(route, code, "响应体为空", ErrorKind.INVALID_RESPONSE)
             return try {

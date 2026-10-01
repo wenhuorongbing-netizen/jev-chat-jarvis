@@ -67,8 +67,11 @@ class ImageReplyTest {
                                 if (models == null) 404 to "not found" else 200 to models
                             } else {
                                 val s = chat[minOf(before, chat.size - 1)]
-                                // an error body that echoes the request, as a careless provider would
-                                if (s == 200) 200 to ENVELOPE else s to "echo:" + String(raw, Charsets.UTF_8)
+                                // an error body that echoes the request, as a careless provider would;
+                                // REFUSED is a 400 that carries the provider's structured "no images" code
+                                if (s == 200) 200 to ENVELOPE
+                                else if (s == REFUSED) 400 to """{"error":{"code":"image_not_supported","message":"this model has no vision"}}"""
+                                else s to "echo:" + String(raw, Charsets.UTF_8)
                             }
                             val out = text.toByteArray(Charsets.UTF_8)
                             sock.getOutputStream().apply {
@@ -144,7 +147,7 @@ class ImageReplyTest {
 
     @Test
     fun `an unknown capability and an explicit refusal of the picture falls back to text exactly once`() {
-        val p = provider(null, 400, 200)
+        val p = provider(null, REFUSED, 200)
         val r = reply(p, EphemeralImage(picture))
         assertEquals(ImageUse.FELL_BACK, r.imageUse)
         assertEquals(2, p.chats.size)
@@ -171,8 +174,28 @@ class ImageReplyTest {
     }
 
     @Test
+    fun `an ambiguous 4xx is never read as the model taking no images`() {
+        for (status in listOf(400, 404, 413, 422)) {
+            val p = provider(null, status, 200)
+            try { reply(p, EphemeralImage(picture)); throw AssertionError("expected a failure for $status") } catch (e: ApiException) {
+                assertEquals(status, e.status)
+            }
+            assertEquals("status $status", 1, p.chats.size)
+        }
+    }
+
+    @Test
+    fun `after the provider refused the picture a transient failure of the text fallback never uploads it again`() {
+        val p = provider(null, REFUSED, 503, 200)
+        val r = reply(p, EphemeralImage(picture))
+        assertEquals(ImageUse.FELL_BACK, r.imageUse)
+        assertEquals(3, p.chats.size)
+        assertEquals(1, p.chats.count { it.hasImage })
+    }
+
+    @Test
     fun `a generation that went stale does not make the fallback call`() {
-        val p = provider(null, 400, 200)
+        val p = provider(null, REFUSED, 200)
         try {
             reply(p, EphemeralImage(picture), isLive = { p.chats.isEmpty() })
             throw AssertionError("expected a failure")
@@ -248,6 +271,7 @@ class ImageReplyTest {
     }
 
     companion object {
+        private const val REFUSED = -400
         private val ENVELOPE = JSONObject().put("choices", org.json.JSONArray().put(JSONObject()
             .put("finish_reason", "stop")
             .put("message", JSONObject().put("content",

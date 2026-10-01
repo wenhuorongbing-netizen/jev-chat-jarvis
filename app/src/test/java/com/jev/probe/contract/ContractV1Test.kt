@@ -11,6 +11,7 @@ import com.jev.probe.core.VisionRoute
 import com.jev.probe.jev.ApiException
 import com.jev.probe.jev.ChatReply
 import com.jev.probe.jev.ErrorKind
+import com.jev.probe.jev.ImageRejection
 import com.jev.probe.jev.InvalidResponseException
 import com.jev.probe.jev.ModelCapabilities
 import com.jev.probe.jev.ModelRoute
@@ -155,6 +156,21 @@ class ContractV1Test {
             val want = c.getJSONObject("expect")
             assertEquals(c.getString("name"), listOf(want.getString("effective"), want.getBoolean("attach"), want.getBoolean("fall_back_to_text"), want.getString("reason")),
                 listOf(got.effective.id, got.attach, got.fallBackToText, got.reason))
+        }
+    }
+
+    // ---------------------------------------------------------------- S5.1: image rejection signal
+
+    @Test
+    fun `image rejection vectors`() {
+        val d = doc("image_rejection.json")
+        assertEquals(d.getJSONArray("codes").strings().toSet(), ImageRejection.CODES)
+        for (st in d.getJSONArray("statuses").let { a -> (0 until a.length()).map { a.getInt(it) } })
+            assertTrue("status $st", ImageRejection.worthReading(st))
+        assertFalse(ImageRejection.worthReading(404))
+        for (c in d.getJSONArray("cases").objects()) {
+            assertEquals(c.getString("name"), c.getBoolean("expect"),
+                ImageRejection.fromBody(c.getInt("status"), c.getString("body")))
         }
     }
 

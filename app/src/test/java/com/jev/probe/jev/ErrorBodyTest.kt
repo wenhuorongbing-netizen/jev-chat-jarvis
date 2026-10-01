@@ -80,6 +80,27 @@ class ErrorBodyTest {
     }
 
     @Test
+    fun `post - a structured no-images code becomes one flag and the body still never reaches the message`() {
+        status = 400
+        body = """{"error":{"code":"image_not_supported","message":"$chatMarker key=$longKey"}}"""
+        try { HttpJson.post(url(), longKey, JSONObject(), Route.REPLY); fail("expected ApiException") } catch (e: ApiException) {
+            assertTrue(e.imageRejected)
+            assertClean(e.message!!, "CHATMARKER", "老王", longKey, "image_not_supported")
+        }
+    }
+
+    @Test
+    fun `post - a plain 400 and a 413 with the same code are not a no-images signal`() {
+        for (s in listOf(400, 413)) {
+            status = s
+            body = if (s == 400) """{"error":{"message":"bad request"}}""" else """{"error":{"code":"image_not_supported"}}"""
+            try { HttpJson.post(url(), shortKey, JSONObject(), Route.REPLY); fail("expected ApiException") } catch (e: ApiException) {
+                assertFalse("status $s", e.imageRejected)
+            }
+        }
+    }
+
+    @Test
     fun `post - a 401 says the key was rejected without the body`() {
         status = 401
         body = """Incorrect API key provided: $longKey"""
