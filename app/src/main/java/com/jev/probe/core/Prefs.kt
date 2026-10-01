@@ -333,12 +333,6 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
     fun effectiveVisionKey(): String =
         VisionRoute.keyWithSameOriginFallback(visionKey, visionBaseUrl, replyBaseUrl, effectiveReplyKey())
 
-    /** Full POST URL for the OpenAI-compatible chat completions call. */
-    fun replyEndpoint(): String = "${replyBaseUrl.trim().trimEnd('/')}/chat/completions"
-
-    /** Same shape as [replyEndpoint]. */
-    fun visionEndpoint(): String = "${visionBaseUrl.trim().trimEnd('/')}/chat/completions"
-
     fun isAllowed(title: String?): Boolean {
         val wl = whitelist
         if (wl.isEmpty()) return true

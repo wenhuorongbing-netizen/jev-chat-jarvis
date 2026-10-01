@@ -7,46 +7,10 @@ import org.junit.Test
 
 /**
  * JVM tests for the reply-payload parsing contract: as many replies as the
- * model gave (never padded), graceful fallback when brackets are missing.
+ * model gave (never padded), strict JSON object only.
  * No Android classes involved; org.json comes from testImplementation.
  */
 class ReplyParserTest {
-
-    // ------------------------------------------------------------ parseThree
-
-    @Test
-    fun `parseThree returns three replies from a json array`() {
-        assertEquals(listOf("先睡了", "明天说", "好的"), ReplyParser.parseThree("""["先睡了","明天说","好的"]"""))
-    }
-
-    @Test
-    fun `parseThree returns as many as the model gave, never pads`() {
-        val out = ReplyParser.parseThree("""["只有一条","第二条"]""")
-        assertEquals(2, out.size)
-        assertTrue(out.none { it.contains("稍等") })
-    }
-
-    @Test
-    fun `parseThree caps at three`() {
-        assertEquals(listOf("a", "b", "c"), ReplyParser.parseThree("""["a","b","c","d","e"]"""))
-    }
-
-    @Test
-    fun `parseThree on an empty array returns empty`() {
-        assertTrue(ReplyParser.parseThree("[]").isEmpty())
-    }
-
-    @Test
-    fun `parseThree falls back to lines when brackets are missing`() {
-        assertEquals(listOf("好的", "明天聊", "晚安"), ReplyParser.parseThree("1. 好的\n2. 明天聊\n3. 晚安"))
-    }
-
-    @Test
-    fun `parseThree skips blank array entries and junk bracket lines`() {
-        assertEquals(listOf("a", "b"), ReplyParser.parseThree("""["a","","  ","b"]"""))
-        assertTrue(ReplyParser.parseThree("[").isEmpty())
-        assertTrue(ReplyParser.parseThree("").isEmpty())
-    }
 
     // ------------------------------------------------------------ parseBilingual
 

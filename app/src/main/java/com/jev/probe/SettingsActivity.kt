@@ -32,6 +32,7 @@ import com.jev.probe.core.kb.KbStore
 import com.jev.probe.core.ui.UiTokens
 import com.jev.probe.core.ui.color
 import com.jev.probe.jev.ModelCapabilities
+import com.jev.probe.jev.ModelRoute
 import com.jev.probe.jev.ReplyClient
 import com.jev.probe.jev.VisionClient
 import java.util.concurrent.Executors
@@ -232,12 +233,11 @@ class SettingsActivity : AppCompatActivity() {
                 } catch (e: Exception) { err = e.message; "" }
                 val ms = System.currentTimeMillis() - t0
                 // 回复模型能不能直接看图（供后面「图直接附进回复请求」用），顺手查一次
-                val replySees = if (err != null) null else ModelCapabilities.shared.supportsImage(
-                    probe.replyBaseUrl, probe.effectiveReplyKey(), probe.replyModel)
+                val replySees = if (err != null) null else ModelCapabilities.shared.imageInput(ModelRoute.reply(probe))
                 main.post {
                     visionResult.text = if (err != null) "失败（${ms}ms）：$err"
                     else "成功 ${ms}ms · ${out.replace("\n", " ").take(60)}" +
-                        "\n回复模型${if (replySees == true) "支持" else "不支持（或查不到）"}直接看图"
+                        (replySees?.let { "\n回复模型：${it.describe()}" } ?: "")
                 }
             }
         })

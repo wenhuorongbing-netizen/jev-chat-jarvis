@@ -416,6 +416,12 @@ open class ChatCaptureService : AccessibilityService() {
         val key = cap.conv.key
         val sig = cap.signature
         val started = System.currentTimeMillis()
+        // The route, the key, the prompt knobs and the history switch are read here, once, before the
+        // worker starts: from now on this generation only sees them, whatever the settings page does.
+        // (ContextBuilder still reads the history count from prefs: a context input, not a route one.)
+        val client = ReplyClient(prefs) { state.isWanted(req) }
+        val contextOn = prefs.contextEnabled
+        val relationSkips = prefs.relationSkips
         submit {
             val ctx = try {
                 ContextBuilder.build(this, snapshot, pkg, prefs)
@@ -427,7 +433,7 @@ open class ChatCaptureService : AccessibilityService() {
             // the model sees only what is on screen right now.
             val transcript: List<Msg>
             val style: List<String>
-            if (prefs.contextEnabled) {
+            if (contextOn) {
                 val mem = ChatMemory.get(this)
                 transcript = runCatching { mem.merge(key, snapshot.messages, true) }.getOrDefault(snapshot.messages)
                 style = runCatching { mem.styleSamples(STYLE_SAMPLES) }.getOrDefault(emptyList())
@@ -441,13 +447,13 @@ open class ChatCaptureService : AccessibilityService() {
             val hasContact = ctx == null || ctx.contact != null
             val isDefaultRel = relBase == Prefs.DEFAULT_REL
             val titleOk = !snapshot.title.isNullOrBlank() && !isTransientTitle(snapshot.title)
-            val skipped = RelationSkips.contains(prefs.relationSkips, pkg, snapshot.title)
+            val skipped = RelationSkips.contains(relationSkips, pkg, snapshot.title)
             val propose = titleOk && OverlayRules.shouldProposeRelation(hasContact, isDefaultRel, skipped)
             // 请求发出前才确认没联系人（例如之后被删了）：这个会话重新有资格被提议。
             // 必须在请求前清，否则会抹掉请求期间用户刚点选留下的标记。
             if (propose) relationSettled.remove(key)
             val raw = try {
-                ReplyClient(prefs).draftBilingual(snapshot, rel, ctx, transcript, style, propose, KbStore.isGroupTitle(snapshot.title))
+                client.draftBilingual(snapshot, rel, ctx, transcript, style, propose, KbStore.isGroupTitle(snapshot.title))
             } catch (e: Exception) {
                 main.post { if (state.finish(req) && overlay?.isShowing() == true) overlay?.showError(e.message ?: e.javaClass.simpleName) }
                 return@submit

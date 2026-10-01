@@ -27,7 +27,8 @@ class OcrTicket internal constructor(internal val epoch: Long, internal val ref:
  * A result is wanted only while its [GenerationRequest.id] is the live one. Any change of
  * conversation or content ([observe]), leaving the chat window or turning the assistant off
  * ([invalidate]) retires the live generation, so a late network result or OCR callback
- * can never update a newer state. Main thread only.
+ * can never update a newer state. Main thread only, except [isWanted], which the network thread
+ * may ask (it only reads).
  */
 class ConversationState {
     var activePkg: String? = null
@@ -44,7 +45,7 @@ class ConversationState {
     private var lastSignature = ""
     private var lastKnown: ConversationRef? = null  // last observed ref with a readable title
     private var nextId = 0L
-    private var live: GenerationRequest? = null
+    @Volatile private var live: GenerationRequest? = null
     private var ocrEpoch = 0L
     private var ocrOpen: OcrTicket? = null
 
@@ -78,6 +79,9 @@ class ConversationState {
         live?.let { if (it.captured == c) return null }
         return GenerationRequest(++nextId, c).also { live = it }
     }
+
+    /** Is [req] still the generation the state wants? Safe from any thread: a retry loop asks it before calling again. */
+    fun isWanted(req: GenerationRequest): Boolean = live?.id == req.id
 
     /** The network thread came back (success or error). True = this is still the wanted generation. */
     fun finish(req: GenerationRequest): Boolean {

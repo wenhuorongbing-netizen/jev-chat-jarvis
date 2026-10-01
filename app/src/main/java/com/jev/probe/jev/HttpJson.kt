@@ -26,7 +26,8 @@ object Route {
 class ApiException(
     val route: String,
     val status: Int?,
-    val hint: String
+    val hint: String,
+    val kind: ErrorKind = status?.let { ErrorKind.ofStatus(it) } ?: ErrorKind.TRANSPORT
 ) : RuntimeException(buildMessage(route, status, hint)) {
 
     companion object {
@@ -47,69 +48,74 @@ class ApiException(
 }
 
 /**
- * Shared POST-JSON helper: UTF-8 body, exponential backoff on 429/529, no retry
- * on other 4xx, and every failure normalized to [ApiException]. Keys are passed
- * in per call and never logged.
+ * Shared POST-JSON helper: UTF-8 body, every failure normalized to [ApiException] with an
+ * [ErrorKind], retried only as [Retry] allows (rate limit / timeout / transport, bounded, and not
+ * once [isLive] says the generation is stale). Keys are passed in per call and never logged.
  */
 object HttpJson {
-
-    private const val MAX_ATTEMPTS = 3
 
     /**
      * @param route one of [Route], used only for error text.
      * @param extraHeaders additional request headers (e.g. OpenRouter attribution).
+     * @param isLive asked before every retry; false = the caller no longer wants the answer.
      */
     fun post(
         url: String,
         key: String,
         body: JSONObject,
         route: String,
-        extraHeaders: Map<String, String> = emptyMap()
+        extraHeaders: Map<String, String> = emptyMap(),
+        isLive: () -> Boolean = { true }
+    ): JSONObject = Retry.run(
+        isLive = isLive,
+        pause = { n -> Thread.sleep(500L * (1L shl n)) },
+        attempt = { postOnce(url, key, body, route, extraHeaders) }
+    )
+
+    private fun postOnce(
+        url: String,
+        key: String,
+        body: JSONObject,
+        route: String,
+        extraHeaders: Map<String, String>
     ): JSONObject {
-        var attempt = 0
-        var last: ApiException? = null
-        while (attempt < MAX_ATTEMPTS) {
-            var conn: HttpURLConnection? = null
-            try {
-                conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    connectTimeout = 15000
-                    readTimeout = 40000
-                    doOutput = true
-                    setRequestProperty("Authorization", "Bearer $key")
-                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                    extraHeaders.forEach { (k, v) -> setRequestProperty(k, v) }
-                }
-                val bytes = body.toString().toByteArray(Charsets.UTF_8)
-                conn.outputStream.use { os: OutputStream -> os.write(bytes) }
-                val code = conn.responseCode
-                if (code == 429 || code == 529) {
-                    last = ApiException(route, code, ApiException.hintFor(code))
-                    attempt++
-                    if (attempt < MAX_ATTEMPTS) Thread.sleep(500L * (1L shl attempt))
-                    continue
-                }
-                // Branch on the status code FIRST, and do not read an error body at
-                // all: only the status and our own hint go into the exception.
-                if (code !in 200..299) throw ApiException(route, code, ApiException.hintFor(code))
-                val text = readBody(conn.inputStream)
-                if (text.isBlank()) throw ApiException(route, code, "响应体为空")
-                return JSONObject(text)
-            } catch (e: ApiException) {
-                if (e.status != null && e.status in 400..499) throw e  // client error: no retry
-                last = e
-                attempt++
-                if (attempt < MAX_ATTEMPTS) Thread.sleep(500L * (1L shl attempt))
-            } catch (e: Exception) {
-                last = ApiException(route, null, describe(e))
-                attempt++
-                if (attempt < MAX_ATTEMPTS) Thread.sleep(500L * (1L shl attempt))
-            } finally {
-                conn?.disconnect()
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 15000
+                instanceFollowRedirects = false  // the key goes to the snapshot's destination only
+                readTimeout = 40000
+                doOutput = true
+                setRequestProperty("Authorization", "Bearer $key")
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                extraHeaders.forEach { (k, v) -> setRequestProperty(k, v) }
             }
+            val bytes = body.toString().toByteArray(Charsets.UTF_8)
+            conn.outputStream.use { os: OutputStream -> os.write(bytes) }
+            val code = conn.responseCode
+            // Branch on the status code FIRST, and do not read an error body at
+            // all: only the status and our own hint go into the exception.
+            if (code !in 200..299) throw ApiException(route, code, ApiException.hintFor(code))
+            val text = readBody(conn.inputStream)
+            if (text.isBlank()) throw ApiException(route, code, "响应体为空", ErrorKind.INVALID_RESPONSE)
+            return try {
+                JSONObject(text)
+            } catch (_: org.json.JSONException) {  // its message quotes the text: say nothing of it
+                throw ApiException(route, code, "响应不是有效的 JSON", ErrorKind.INVALID_RESPONSE)
+            }
+        } catch (e: ApiException) {
+            throw e
+        } catch (e: Exception) {
+            throw ApiException(route, null, describe(e), kindOfTransport(e))
+        } finally {
+            conn?.disconnect()
         }
-        throw last ?: ApiException(route, null, "请求失败")
     }
+
+    /** A socket timeout is its own class (it has a smaller retry cap); every other transport failure is TRANSPORT. */
+    private fun kindOfTransport(e: Exception): ErrorKind =
+        if (e is java.net.SocketTimeoutException) ErrorKind.TIMEOUT else ErrorKind.TRANSPORT
 
     /**
      * Single GET, no retry (callers treat any failure as "unknown"). Returns the
@@ -121,6 +127,7 @@ object HttpJson {
             conn = (URL(url).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = 10000
+                instanceFollowRedirects = false
                 readTimeout = 15000
                 setRequestProperty("Authorization", "Bearer $key")
                 setRequestProperty("Accept", "application/json")
@@ -132,7 +139,7 @@ object HttpJson {
         } catch (e: ApiException) {
             throw e
         } catch (e: Exception) {
-            throw ApiException(route, null, describe(e))
+            throw ApiException(route, null, describe(e), kindOfTransport(e))
         } finally {
             conn?.disconnect()
         }

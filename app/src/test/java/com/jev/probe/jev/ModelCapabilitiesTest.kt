@@ -2,110 +2,127 @@ package com.jev.probe.jev
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 模型能力查询：只测「给定模型列表返回，判断是否支持图片」这一外部行为。 */
+/**
+ * 模型能力查询的本机行为：缓存按 base+model 分、只缓存接口亲口说的、会过期、失败不当成「不支持」。
+ * 解析口径（四种状态 + 证据）在共享契约 capability.json 里，由 ContractV1Test 读。
+ */
 class ModelCapabilitiesTest {
 
-    private val deepseekList = """
+    private val list = """
         {"object":"list","data":[
-          {"id":"deepseek-flash","object":"model","owned_by":"deepseek","input_modalities":["text","image"]},
-          {"id":"deepseek-chat","object":"model","owned_by":"deepseek","input_modalities":["text"]},
-          {"id":"no-modalities","object":"model","owned_by":"deepseek"}
+          {"id":"vision-model","input_modalities":["text","image"]},
+          {"id":"text-model","input_modalities":["text"]},
+          {"id":"silent-model"}
         ]}
     """.trimIndent()
 
-    @Test
-    fun `a model that lists image input is supported`() {
-        assertTrue(ModelCapabilities.parseSupportsImage(deepseekList, "deepseek-flash"))
-    }
-
-    @Test
-    fun `a text-only model is not supported`() {
-        assertFalse(ModelCapabilities.parseSupportsImage(deepseekList, "deepseek-chat"))
-    }
-
-    @Test
-    fun `a model without the modalities field is not supported`() {
-        assertFalse(ModelCapabilities.parseSupportsImage(deepseekList, "no-modalities"))
-    }
-
-    @Test
-    fun `a model missing from the list is not supported`() {
-        assertFalse(ModelCapabilities.parseSupportsImage(deepseekList, "gpt-x"))
-    }
-
-    @Test
-    fun `broken or unexpected payloads count as not supported`() {
-        assertFalse(ModelCapabilities.parseSupportsImage(null, "deepseek-flash"))
-        assertFalse(ModelCapabilities.parseSupportsImage("", "deepseek-flash"))
-        assertFalse(ModelCapabilities.parseSupportsImage("not json", "deepseek-flash"))
-        assertFalse(ModelCapabilities.parseSupportsImage("""{"data":"oops"}""", "deepseek-flash"))
-        assertFalse(ModelCapabilities.parseSupportsImage("""{"data":[1,2]}""", "deepseek-flash"))
-        assertFalse(ModelCapabilities.parseSupportsImage("""{"data":[{"id":"deepseek-flash","input_modalities":"image"}]}""", "deepseek-flash"))
-        assertFalse(ModelCapabilities.parseSupportsImage("""{"error":"x"}""", "deepseek-flash"))
-    }
-
-    @Test
-    fun `an OpenRouter-shaped list without the top-level field is not supported`() {
-        val or = """{"data":[{"id":"deepseek-flash","architecture":{"input_modalities":["text","image"]}}]}"""
-        assertFalse(ModelCapabilities.parseSupportsImage(or, "deepseek-flash"))
-    }
-
-    // ------------------------------------------------------------ caching
+    private fun route(model: String, base: String = "https://api.example.com/v1", key: String = "k") =
+        ModelRoute(Route.REPLY, base, model, key)
 
     private class Fetcher(var body: String?) {
         var calls = 0
-        val fetch: (String, String) -> String? = { _, _ -> calls++; body }
+        var lastBase: String? = null
+        val fetch: (ModelRoute) -> String? = { calls++; lastBase = it.base; body }
     }
 
     @Test
-    fun `the answer is cached per base and model`() {
-        val f = Fetcher(deepseekList)
+    fun `provider answers are cached per base and model`() {
+        val f = Fetcher(list)
         val caps = ModelCapabilities(f.fetch)
-        assertTrue(caps.supportsImage("https://api.deepseek.com/v1", "k", "deepseek-flash"))
-        assertTrue(caps.supportsImage("https://api.deepseek.com/v1/", "k", "deepseek-flash"))
+        assertEquals(CapState.SUPPORTED, caps.imageInput(route("vision-model")).state)
+        assertEquals(CapState.SUPPORTED, caps.imageInput(route("vision-model", base = "https://API.example.com/v1/")).state)
         assertEquals(1, f.calls)
-        assertFalse(caps.supportsImage("https://api.deepseek.com/v1", "k", "deepseek-chat"))
+        assertEquals(CapState.UNSUPPORTED, caps.imageInput(route("text-model")).state)
         assertEquals(2, f.calls)
     }
 
     @Test
-    fun `switching the model gives the new model's answer`() {
-        val caps = ModelCapabilities(Fetcher(deepseekList).fetch)
-        assertTrue(caps.supportsImage("https://api.deepseek.com/v1", "k", "deepseek-flash"))
-        assertFalse(caps.supportsImage("https://api.deepseek.com/v1", "k", "deepseek-chat"))
-        assertTrue(caps.supportsImage("https://api.deepseek.com/v1", "k", "deepseek-flash"))
+    fun `another base never reuses the answer of this one`() {
+        val f = Fetcher(list)
+        val caps = ModelCapabilities(f.fetch)
+        assertEquals(CapState.SUPPORTED, caps.imageInput(route("vision-model", base = "https://a.example.com/v1")).state)
+        f.body = """{"data":[{"id":"vision-model","input_modalities":["text"]}]}"""
+        assertEquals(CapState.UNSUPPORTED, caps.imageInput(route("vision-model", base = "https://b.example.com/v1")).state)
+        assertEquals(CapState.UNSUPPORTED, caps.imageInput(route("vision-model", base = "https://a.example.com/v2")).state)
+        assertEquals(CapState.SUPPORTED, caps.imageInput(route("vision-model", base = "https://a.example.com/v1")).state)
+        assertEquals(3, f.calls)
     }
 
     @Test
-    fun `a failed lookup is not supported and is retried next time`() {
+    fun `an answer expires`() {
+        var t = 1_000L
+        val f = Fetcher(list)
+        val caps = ModelCapabilities(f.fetch, now = { t }, ttlMs = 100)
+        caps.imageInput(route("vision-model"))
+        t += 99
+        caps.imageInput(route("vision-model"))
+        assertEquals(1, f.calls)
+        t += 2
+        caps.imageInput(route("vision-model"))
+        assertEquals(2, f.calls)
+    }
+
+    @Test
+    fun `unknown is never cached, so a failed lookup is asked again`() {
         val f = Fetcher(null)
         val caps = ModelCapabilities(f.fetch)
-        assertFalse(caps.supportsImage("https://api.deepseek.com/v1", "k", "deepseek-flash"))
-        f.body = deepseekList
-        assertTrue(caps.supportsImage("https://api.deepseek.com/v1", "k", "deepseek-flash"))
-        assertEquals(2, f.calls)
+        assertEquals(Capability(CapState.UNKNOWN, Evidence.FETCH_FAILED), caps.imageInput(route("vision-model")))
+        f.body = list
+        assertEquals(CapState.SUPPORTED, caps.imageInput(route("vision-model")).state)
+        f.body = """{"data":[{"id":"silent-model"}]}"""
+        assertEquals(Capability(CapState.UNKNOWN, Evidence.FIELD_ABSENT), caps.imageInput(route("silent-model")))
+        assertEquals(Capability(CapState.UNKNOWN, Evidence.FIELD_ABSENT), caps.imageInput(route("silent-model")))
+        assertEquals(4, f.calls)
+    }
+
+    @Test
+    fun `a failed lookup is unknown, never unsupported`() {
+        val caps = ModelCapabilities(fetch = { throw ApiException(Route.REPLY, 401, "x") })
+        val cap = caps.imageInput(route("vision-model"))
+        assertEquals(CapState.UNKNOWN, cap.state)
+        assertNotEquals(CapState.UNSUPPORTED, cap.state)
     }
 
     @Test
     fun `a throwing fetcher never escapes`() {
-        val caps = ModelCapabilities { _, _ -> throw RuntimeException("boom") }
-        assertFalse(caps.supportsImage("https://api.deepseek.com/v1", "k", "deepseek-flash"))
+        val caps = ModelCapabilities(fetch = { throw RuntimeException("boom") })
+        assertEquals(CapState.UNKNOWN, caps.imageInput(route("vision-model")).state)
     }
 
     @Test
-    fun `a blank key or model is not supported without a request`() {
-        val f = Fetcher(deepseekList)
+    fun `a blank key or model is unknown without a request`() {
+        val f = Fetcher(list)
         val caps = ModelCapabilities(f.fetch)
-        assertFalse(caps.supportsImage("https://api.deepseek.com/v1", "", "deepseek-flash"))
-        assertFalse(caps.supportsImage("https://api.deepseek.com/v1", "k", " "))
+        assertEquals(Evidence.FETCH_FAILED, caps.imageInput(route("vision-model", key = "")).evidence)
+        assertEquals(Evidence.MODEL_NOT_LISTED, caps.imageInput(route(" ")).evidence)
+        assertEquals(Evidence.FETCH_FAILED, caps.imageInput(route("vision-model", base = "not a url")).evidence)
         assertEquals(0, f.calls)
     }
 
     @Test
-    fun `models url sits under the base`() {
-        assertEquals("https://api.deepseek.com/v1/models", ModelCapabilities.modelsUrl("https://api.deepseek.com/v1/"))
+    fun `the route is what is asked`() {
+        val f = Fetcher(list)
+        ModelCapabilities(f.fetch).imageInput(route("vision-model", base = "https://api.example.com/v1/"))
+        assertEquals("https://api.example.com/v1", f.lastBase)
+    }
+
+    @Test
+    fun `a route never prints its key`() {
+        val r = route("vision-model", key = "sk-secret-123")
+        assertFalse(r.toString().contains("sk-secret"))
+        assertTrue(r.toString().contains("vision-model"))
+    }
+
+    @Test
+    fun `a describe line says which kind of not knowing it is`() {
+        val lines = listOf(Evidence.FETCH_FAILED, Evidence.MODEL_NOT_LISTED, Evidence.FIELD_ABSENT, Evidence.UNKNOWN_SHAPE)
+            .map { Capability(CapState.UNKNOWN, it).describe() }
+        assertEquals(lines.size, lines.toSet().size)
+        assertTrue(lines.all { it.startsWith("不确定") })
+        assertFalse(Capability(CapState.UNSUPPORTED, Evidence.PROVIDER_DECLARED).describe().startsWith("不确定"))
     }
 }

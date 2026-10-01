@@ -9,6 +9,14 @@ import com.jev.probe.core.FillVerdict
 import com.jev.probe.core.Msg
 import com.jev.probe.core.VisionRoute
 import com.jev.probe.jev.ApiException
+import com.jev.probe.jev.ChatReply
+import com.jev.probe.jev.ErrorKind
+import com.jev.probe.jev.InvalidResponseException
+import com.jev.probe.jev.ModelCapabilities
+import com.jev.probe.jev.ModelRoute
+import com.jev.probe.jev.Retry
+import com.jev.probe.jev.Route
+import com.jev.probe.jev.CapState
 import com.jev.probe.jev.ReplyParser
 import org.json.JSONArray
 import org.json.JSONObject
@@ -94,6 +102,159 @@ class ContractV1Test {
     }
 
     private fun JSONArray.strings() = (0 until length()).map { getString(it) }
+
+    // ---------------------------------------------------------------- S4: capability
+
+    @Test
+    fun `capability parse vectors`() {
+        for (c in doc("capability.json").getJSONArray("parse_cases").objects()) {
+            val got = ModelCapabilities.parseImage(c.getString("base"), c.getString("body"), c.getString("model"))
+            val want = c.getJSONObject("expect")
+            assertEquals(c.getString("name"), want.getString("state") to want.getString("evidence"), got.state.id to got.evidence.id)
+        }
+    }
+
+    @Test
+    fun `capability fetch vectors - a failed lookup is unknown and never cached`() {
+        for (c in doc("capability.json").getJSONArray("fetch_cases").objects()) {
+            val outcome = c.getString("outcome")
+            var calls = 0
+            val caps = ModelCapabilities(fetch = {
+                calls++
+                when {
+                    outcome.startsWith("http_") -> throw ApiException(Route.REPLY, outcome.removePrefix("http_").toInt(), "x")
+                    outcome == "timeout" -> throw ApiException(Route.REPLY, null, "x", ErrorKind.TIMEOUT)
+                    else -> throw ApiException(Route.REPLY, null, "x")
+                }
+            })
+            val route = ModelRoute(Route.REPLY, "https://api.example.com/v1", "m", if (outcome == "no_key") "" else "k")
+            val want = c.getJSONObject("expect")
+            val got = caps.imageInput(route)
+            assertEquals(c.getString("name"), want.getString("state") to want.getString("evidence"), got.state.id to got.evidence.id)
+            caps.imageInput(route)
+            assertEquals(c.getString("name"), if (want.getBoolean("cached")) 1 else (if (outcome == "no_key") 0 else 2), calls)
+        }
+    }
+
+    @Test
+    fun `capability cache key vectors`() {
+        for (c in doc("capability.json").getJSONArray("cache_key_cases").objects()) {
+            val a = c.getJSONObject("a")
+            val b = c.getJSONObject("b")
+            val ka = ModelCapabilities.cacheKey(a.getString("base"), a.getString("model"))
+            val kb = ModelCapabilities.cacheKey(b.getString("base"), b.getString("model"))
+            assertEquals(c.getString("name"), c.getBoolean("same"), ka != null && ka == kb)
+        }
+    }
+
+    @Test
+    fun `image decision vectors`() {
+        for (c in doc("capability.json").getJSONArray("image_decision_cases").objects()) {
+            val cap = CapState.values().first { it.id == c.getString("capability") }
+            val got = ModelCapabilities.decideImage(cap, c.getBoolean("owner_enabled"), c.getBoolean("client_can_attach"))
+            val want = c.getJSONObject("expect")
+            assertEquals(c.getString("name"), listOf(want.getString("effective"), want.getBoolean("attach"), want.getBoolean("fall_back_to_text"), want.getString("reason")),
+                listOf(got.effective.id, got.attach, got.fallBackToText, got.reason))
+        }
+    }
+
+    // ---------------------------------------------------------------- S4: retry policy
+
+    @Test
+    fun `retry table vectors`() {
+        val d = doc("retry_policy.json")
+        val table = d.getJSONObject("retry")
+        assertEquals(table.keys().asSequence().toSet(), ErrorKind.values().map { it.id }.toSet())
+        for (k in ErrorKind.values()) {
+            val want = table.getJSONObject(k.id)
+            assertEquals(k.id, want.getBoolean("retry"), k.retries)
+            assertEquals(k.id, want.getInt("max_attempts"), k.maxAttempts)
+        }
+    }
+
+    @Test
+    fun `status class vectors`() {
+        for (c in doc("retry_policy.json").getJSONArray("status_cases").objects()) {
+            assertEquals("status ${c.getInt("status")}", c.getString("class"), ErrorKind.ofStatus(c.getInt("status")).id)
+        }
+    }
+
+    private fun failureFor(code: String): Exception = when {
+        code.startsWith("http_") -> code.removePrefix("http_").toInt().let { ApiException(Route.REPLY, it, ApiException.hintFor(it)) }
+        code == "timeout" -> ApiException(Route.REPLY, null, "x", ErrorKind.TIMEOUT)
+        code == "transport" -> ApiException(Route.REPLY, null, "x")
+        code == "invalid" -> InvalidResponseException("x")
+        code == "cancelled" -> java.util.concurrent.CancellationException("x")
+        // Android has no key-binding gate (same-origin rule instead); the class the contract gives it is auth.
+        code == "route_mismatch" -> ApiException(Route.REPLY, null, "x", ErrorKind.AUTH)
+        else -> error(code)
+    }
+
+    @Test
+    fun `failure class vectors`() {
+        for (c in doc("retry_policy.json").getJSONArray("failure_cases").objects()) {
+            val code = c.getString("failure")
+            assertEquals(code, c.getString("class"), ErrorKind.of(failureFor(code))!!.id)
+        }
+    }
+
+    @Test
+    fun `retry flow vectors run through the production Retry`() {
+        for (c in doc("retry_policy.json").getJSONArray("flow_cases").objects()) {
+            val attempts = c.getJSONArray("attempts").strings()
+            val live = c.getJSONArray("live").let { a -> (0 until a.length()).map { a.getBoolean(it) } }.toMutableList()
+            var calls = 0
+            var pauses = 0
+            val outcome = try {
+                Retry.run(
+                    isLive = { if (live.isEmpty()) true else live.removeAt(0) },
+                    pause = { pauses++ },
+                    attempt = { n -> calls++; attempts[n - 1].let { if (it == "ok") "ok" else throw failureFor(it) } }
+                )
+            } catch (e: Exception) { ErrorKind.of(e)!!.id }
+            val want = c.getJSONObject("expect")
+            assertEquals(c.getString("name"), listOf(want.getInt("calls"), want.getString("outcome"), want.getInt("pauses")), listOf(calls, outcome, pauses))
+        }
+    }
+
+    // ---------------------------------------------------------------- S4: reply outcome
+
+    @Test
+    fun `reply outcome vectors`() {
+        val d = doc("reply_outcome.json")
+        val errors = d.getJSONObject("errors")
+        for (c in d.getJSONArray("cases").objects()) {
+            val name = c.getString("name")
+            val env = c.getJSONObject("envelope")
+            val reply = ChatReply(env.strOrNull("content").orEmpty(), env.strOrNull("refusal").orEmpty(), env.strOrNull("finish_reason").orEmpty())
+            if (c.has("error")) {
+                val e = try { ReplyParser.parseBilingual(reply); null } catch (e: InvalidResponseException) { e }
+                assertEquals(name, errors.getString(c.getString("error")), e?.message)
+                assertEquals(name, ErrorKind.INVALID_RESPONSE, ErrorKind.of(e!!))
+                if (c.has("must_not_leak")) assertFalse(name, e.message!!.contains(c.getString("must_not_leak")))
+            } else {
+                val got = ReplyParser.parseBilingual(reply)
+                val want = c.getJSONObject("expect")
+                if (want.has("lang")) assertEquals(name, want.getString("lang"), got.lang)
+                if (want.has("analysis")) assertEquals(name, want.getString("analysis"), got.analysis)
+                if (want.has("translation")) assertEquals(name, want.getString("translation"), got.translation)
+                assertEquals(name, want.getJSONArray("candidates").strings(), got.replies.map { it.text })
+                if (want.has("glosses")) assertEquals(name, want.getJSONArray("glosses").strings(), got.replies.map { it.zh })
+            }
+        }
+    }
+
+    @Test
+    fun `the envelope is read from a real chat-completions response`() {
+        fun env(json: String) = ChatReply.of(JSONObject(json))
+        val ok = env("""{"choices":[{"finish_reason":"stop","message":{"content":"{\"replies\":[\"a\"]}"}}]}""")
+        assertEquals("a", ReplyParser.parseBilingual(ok).replies.single().text)
+        val refused = env("""{"choices":[{"finish_reason":"stop","message":{"content":null,"refusal":"no"}}]}""")
+        assertEquals("模型拒绝回答这条消息", try { ReplyParser.parseBilingual(refused); "" } catch (e: InvalidResponseException) { e.message })
+        val nullContent = env("""{"choices":[{"message":{"content":null}}]}""")
+        assertEquals("", nullContent.content)  // not the word "null"
+        assertEquals("", env("""{}""").content)
+    }
 
     @Test
     fun `fill verdict vectors`() {

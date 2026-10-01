@@ -10,30 +10,25 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * The generative route: any OpenAI-compatible `/chat/completions` endpoint.
- * Drafts the 3 candidate replies, and (D stage) summarizes text. Reads
- * replyBaseUrl / replyKey / replyModel from [Prefs].
+ * What one reply call needs from the settings, read once: the route (base, model, key) and the two
+ * prompt knobs. The client never goes back to [Prefs], so a settings change cannot reach a call
+ * that has already started.
  */
-class ReplyClient(private val prefs: Prefs) {
-
-    /**
-     * Exactly 3 varied candidate replies in Chinese.
-     *
-     * @param ctx D-stage knowledge context. When present its background and
-     *        history are prepended to the prompt with an instruction to stay
-     *        consistent with them and invent nothing beyond them.
-     */
-    fun draft(snapshot: ChatSnapshot, relationship: String, ctx: ChatContext? = null): List<String> {
-        val convo = snapshot.messages.takeLast(10).joinToString("\n") {
-            (if (it.side == "me") "我" else "对方") + "：" + it.text
-        }
-        val sys = "你是中文即时通讯回复助手。只输出一个 JSON 数组，含且仅含 3 条候选回复文本，" +
-            "三条策略要有区别（例如：一条稳妥承接、一条给具体行动或承诺、一条简短低姿态）。" +
-            "每条不超过 40 字，口语、自然、像真人在聊天软件里发消息。不要解释，不要加引号以外的内容，直接输出 JSON 数组。"
-        val user = knowledgeBlock(relationship, ctx) +
-            "关系：$relationship\n\n最近对话：\n$convo\n\n请给出 3 条候选回复。"
-        return ReplyParser.parseThree(chat(sys, user, temperature = 0.8))
+class ReplyConfig(val route: ModelRoute, val aboutMe: String, val historyCount: Int) {
+    companion object {
+        fun of(prefs: Prefs) = ReplyConfig(ModelRoute.reply(prefs), prefs.aboutMe, prefs.contextHistoryCount.coerceIn(0, 100))
     }
+}
+
+/**
+ * The generative route: any OpenAI-compatible `/chat/completions` endpoint.
+ * Drafts the 3 candidate replies, and (D stage) summarizes text. Everything it needs from
+ * [Prefs] is taken when it is constructed (see [ReplyConfig]); [isLive] says whether the
+ * generation it serves is still wanted, so a stale one is not retried.
+ */
+class ReplyClient(private val cfg: ReplyConfig, private val isLive: () -> Boolean = { true }) {
+
+    constructor(prefs: Prefs, isLive: () -> Boolean = { true }) : this(ReplyConfig.of(prefs), isLive)
 
     /**
      * Bilingual mode, one round trip: the other side's latest messages rendered
@@ -59,7 +54,7 @@ class ReplyClient(private val prefs: Prefs) {
         val mine = transcript.filter { it.side == "me" }.map { it.text }.ifEmpty { style }
         val typical = mine.map { it.length }.sorted().let { if (it.isEmpty()) 0 else it[it.size / 2] }
 
-        val about = prefs.aboutMe.ifBlank { "中国人，平时用手机聊天。" }
+        val about = cfg.aboutMe.ifBlank { "中国人，平时用手机聊天。" }
         val sb = StringBuilder()
         sb.append("关于我：").append(about).append("\n\n")
         if (style.isNotEmpty()) {
@@ -91,7 +86,7 @@ class ReplyClient(private val prefs: Prefs) {
         if (background.isNotBlank()) sb.append(background).append('\n')
         if (history.isNotEmpty()) {
             sb.append("\n更早的聊天记录（越靠下越新）：\n")
-            history.takeLast(prefs.contextHistoryCount.coerceIn(0, 100)).forEach {
+            history.takeLast(cfg.historyCount).forEach {
                 sb.append(if (it.side == "me") "我：" else "对方：").append(it.text).append('\n')
             }
         }
@@ -105,29 +100,26 @@ class ReplyClient(private val prefs: Prefs) {
      * the summary prompt happens to be.
      */
     fun ping(): String =
-        chat("你是连通性测试助手，只按要求回答，不要解释。", "请只回复两个字：收到", temperature = 0.0).trim()
+        ReplyParser.contentOf(chat("你是连通性测试助手，只按要求回答，不要解释。", "请只回复两个字：收到", temperature = 0.0)).trim()
 
     /** Condense a block of text (used by the D-stage contact auto-summary). */
     fun summarize(text: String): String {
         if (text.isBlank()) return ""
         val sys = "你是中文摘要助手。把给到的聊天记录压缩成不超过 120 字的第三人称要点摘要，" +
             "只保留事实、偏好、承诺和待办，不要评论，不要编造。直接输出摘要正文。"
-        return chat(sys, text, temperature = 0.2).trim()
+        return ReplyParser.contentOf(chat(sys, text, temperature = 0.2)).trim()
     }
 
-    /** One chat-completions round trip; returns the assistant message content. */
-    private fun chat(system: String, user: String, temperature: Double): String {
-        val url = prefs.replyEndpoint()
+    /** One chat-completions round trip; returns the assistant message envelope. */
+    private fun chat(system: String, user: String, temperature: Double): ChatReply {
         val messages = JSONArray()
             .put(JSONObject().put("role", "system").put("content", system))
             .put(JSONObject().put("role", "user").put("content", user))
         val body = JSONObject()
-            .put("model", prefs.replyModel)
+            .put("model", cfg.route.model)
             .put("messages", messages)
             .put("temperature", temperature)
-        val resp = HttpJson.post(url, prefs.effectiveReplyKey(), body, Route.REPLY, HttpJson.headersFor(url))
-        return resp.optJSONArray("choices")?.optJSONObject(0)
-            ?.optJSONObject("message")?.optString("content") ?: ""
+        return ChatReply.of(cfg.route.post(body, isLive))
     }
 
     companion object {
@@ -168,6 +160,18 @@ class ReplyClient(private val prefs: Prefs) {
     }
 }
 
+/** The parts of a chat-completions message the app looks at; each may be absent or JSON null. */
+internal class ChatReply(val content: String, val refusal: String, val finishReason: String) {
+    companion object {
+        fun of(resp: JSONObject): ChatReply {
+            val choice = resp.optJSONArray("choices")?.optJSONObject(0)
+            val message = choice?.optJSONObject("message")
+            fun text(o: JSONObject?, key: String) = if (o == null || o.isNull(key)) "" else o.optString(key)
+            return ChatReply(text(message, "content"), text(message, "refusal"), text(choice, "finish_reason"))
+        }
+    }
+}
+
 /**
  * Pure parsers for the reply route's payloads: no Android classes, no network,
  * so they run under plain JVM unit tests. The contract is "as many as the model
@@ -176,43 +180,25 @@ class ReplyClient(private val prefs: Prefs) {
  */
 internal object ReplyParser {
 
-    /**
-     * Up to 3 candidate replies from a JSON array, falling back to one-per-line
-     * when the model dropped the brackets entirely.
-     */
-    fun parseThree(content: String): List<String> {
-        val start = content.indexOf('[')
-        val end = content.lastIndexOf(']')
-        if (start >= 0 && end > start) {
-            try {
-                val arr = JSONArray(content.substring(start, end + 1))
-                val out = ArrayList<String>()
-                for (i in 0 until arr.length()) {
-                    val s = arr.optString(i).trim()
-                    if (s.isNotEmpty()) out.add(s)
-                }
-                // A valid array answers as-is — even when that means 0-2 replies.
-                return out.take(3)
-            } catch (_: Exception) { }
-        }
-        // Fallback: split lines. Bracket-only lines ("[", "]", "[],", …) are the
-        // debris of a broken JSON dump, not replies.
-        return content.split("\n")
-            .map { it.trim().trimStart('-', '*', '1', '2', '3', '.', ' ', '"') }
-            .filter { line -> line.isNotBlank() && line.any { ch -> ch !in "[]," } }
-            .take(3)
+    /** The usable text of an envelope; a refusal is the failure "refused" (contracts/jev/v1/reply_outcome.json). */
+    fun contentOf(reply: ChatReply): String {
+        if (reply.refusal.isNotBlank() || (reply.finishReason == "content_filter" && reply.content.isBlank()))
+            throw InvalidResponseException("模型拒绝回答这条消息")
+        return reply.content
     }
+
+    fun parseBilingual(reply: ChatReply): BilingualResult = parseBilingual(contentOf(reply))
 
     /** Bilingual payload: translation + replies(+zh) + lang + analysis. Throws when unusable. */
     fun parseBilingual(content: String): BilingualResult {
         val start = content.indexOf('{')
         val end = content.lastIndexOf('}')
         // Model output can quote the chat back; no message here may carry any of it.
-        if (start < 0 || end <= start) throw IllegalStateException("模型没有返回 JSON")
+        if (start < 0 || end <= start) throw InvalidResponseException("模型没有返回 JSON")
         val obj = try {
             JSONObject(content.substring(start, end + 1))
         } catch (_: org.json.JSONException) {
-            throw IllegalStateException("模型返回的 JSON 无法解析")
+            throw InvalidResponseException("模型返回的 JSON 无法解析")
         }
         val arr = obj.optJSONArray("replies") ?: JSONArray()
         val replies = ArrayList<RankedReply>()
@@ -226,7 +212,7 @@ internal object ReplyParser {
             }
             if (text.isNotEmpty()) replies.add(RankedReply(text, 0.0, zh))
         }
-        if (replies.isEmpty()) throw IllegalStateException("模型没有给出候选回复")
+        if (replies.isEmpty()) throw InvalidResponseException("模型没有给出候选回复")
         return BilingualResult(
             textOf(obj, "translation"), replies.take(3),
             lang = textOf(obj, "lang"), analysis = textOf(obj, "analysis"),

@@ -12,9 +12,9 @@ import org.json.JSONObject
  * accepts `image_url` content parts. A-stage shell only — B stage wires it to
  * the screenshot pipeline (see docs/v1.3-plan.md "OCR 分层").
  *
- * Reads visionBaseUrl / visionKey / visionModel from [Prefs]. Unset values follow
- * the reply route (DeepSeek reply -> `deepseek-flash` on the same key); whether
- * a model takes images is asked of the provider, see [ModelCapabilities].
+ * Takes visionBaseUrl / visionKey / visionModel from [Prefs] once, as a [ModelRoute], when it is
+ * constructed. Unset values follow the reply route (DeepSeek reply -> `deepseek-flash` on the same
+ * key); whether a model takes images is asked of the provider, see [ModelCapabilities].
  *
  * Wire format notes that cost real debugging time:
  * - JPEG, not PNG: a screenshot as PNG base64 is several times larger.
@@ -23,7 +23,9 @@ import org.json.JSONObject
  * - The image part goes BEFORE the text part — DashScope's compatible-mode
  *   rejects the other order.
  */
-class VisionClient(private val prefs: Prefs) {
+class VisionClient(private val route: ModelRoute) {
+
+    constructor(prefs: Prefs) : this(ModelRoute.vision(prefs))
 
     /**
      * Send a screenshot and get the transcribed dialog back as plain text.
@@ -39,7 +41,6 @@ class VisionClient(private val prefs: Prefs) {
 
     /** Generic single-question call against the image (used by the settings test). */
     fun ask(imageBase64Jpeg: String, prompt: String): String {
-        val url = prefs.visionEndpoint()
         // Image first, then text: DashScope compatible-mode requires this order.
         val content = JSONArray()
             .put(JSONObject()
@@ -49,12 +50,10 @@ class VisionClient(private val prefs: Prefs) {
         val messages = JSONArray().put(
             JSONObject().put("role", "user").put("content", content))
         val body = JSONObject()
-            .put("model", prefs.visionModel)
+            .put("model", route.model)
             .put("messages", messages)
             .put("temperature", 0.0)
-        val resp = HttpJson.post(url, prefs.effectiveVisionKey(), body, Route.VISION, HttpJson.headersFor(url))
-        return resp.optJSONArray("choices")?.optJSONObject(0)
-            ?.optJSONObject("message")?.optString("content") ?: ""
+        return ChatReply.of(route.post(body)).content
     }
 
     companion object {
