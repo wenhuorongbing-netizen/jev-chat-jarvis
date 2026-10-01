@@ -36,8 +36,12 @@ class ImageHintTest {
 
     @Test fun `a presence line proves a direct chat and a member list does not`() {
         assertTrue(ImageHint.directChatProof("在线"))
-        assertTrue(ImageHint.directChatProof(" online "))
-        assertTrue(ImageHint.directChatProof("last seen today at 10:00"))
+        assertTrue(ImageHint.directChatProof(" 在线 "))
+        // the same line in other languages and states is not sampled on a device yet: no proof
+        assertFalse(ImageHint.directChatProof("online"))
+        assertFalse(ImageHint.directChatProof("last seen today at 10:00"))
+        assertFalse(ImageHint.directChatProof("最后上线 今天 10:00"))
+        assertFalse(ImageHint.directChatProof("正在输入…"))
         assertFalse(ImageHint.directChatProof("你, Anna, Bob"))
         assertFalse(ImageHint.directChatProof("给自己发消息"))
         assertFalse(ImageHint.directChatProof(""))

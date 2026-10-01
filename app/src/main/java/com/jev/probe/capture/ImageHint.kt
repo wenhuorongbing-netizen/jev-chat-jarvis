@@ -19,13 +19,13 @@ object ImageHint {
 
     /**
      * A one-to-one chat's toolbar subtitle is a presence line; a group's is the list of its members.
-     * "在线" is seen on a real device (WhatsApp 2.26.37.73, zh-CN); the others are the same line in the
-     * other UI languages the owner uses and are NOT verified — a miss only means no pointer.
+     * An evidence allow-list, not a pattern: only text seen on a real device counts ("在线", WhatsApp
+     * 2.26.37.73, zh-CN). Other languages or states (online, last seen, typing…) join only after each
+     * is sampled on a device.
      */
-    private val PRESENCE = Regex("^(在线|online|最后上线.*|last seen.*|zuletzt online.*|正在输入.*|typing.*)$", RegexOption.IGNORE_CASE)
+    private val PRESENCE_SEEN = setOf("在线")
 
-    fun directChatProof(status: String?): Boolean =
-        !status.isNullOrBlank() && PRESENCE.matches(status.trim())
+    fun directChatProof(status: String?): Boolean = status?.trim() in PRESENCE_SEEN
 
     fun offered(pkg: String, snapshot: ChatSnapshot, ownerEnabled: Boolean): Boolean =
         ownerEnabled &&
